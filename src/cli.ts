@@ -23,6 +23,14 @@ import {
 } from "./execution-mode.js";
 import { doctor, recoverFromCrash, status, tailLog } from "./observability.js";
 import {
+  createView,
+  killView,
+  resizeClaude,
+  toggleSidekicks,
+  viewExists,
+  VIEW_SESSION,
+} from "./view.js";
+import {
   configPath,
   DEFAULT_CONFIG,
   loadConfig,
@@ -164,12 +172,49 @@ program
         }
       }
 
-      // Attach to Claude's tmux session for the user's UI (unless --no-attach).
-      if (opts.attach && opts.claude) {
+      // Build the side-by-side view if all three are alive.
+      const allAlive =
+        (await adapters.CLAUDE.isAlive()) &&
+        (await adapters.CODEX.isAlive()) &&
+        (await adapters.GEMINI.isAlive());
+
+      if (allAlive && opts.attach) {
+        try {
+          const r = await createView({
+            claudeSession: adapters.CLAUDE.sessionName,
+            codexSession: adapters.CODEX.sessionName,
+            geminiSession: adapters.GEMINI.sessionName,
+          });
+          for (const n of r.notes) process.stdout.write(`${n}\n`);
+        } catch (e) {
+          process.stderr.write(`view setup failed: ${(e as Error).message}\n`);
+          process.stderr.write(
+            `falling back to direct claude attach. agents are running.\n`,
+          );
+          const fallback = spawnProc(
+            "tmux",
+            ["attach", "-t", adapters.CLAUDE.sessionName],
+            { stdio: "inherit" },
+          );
+          fallback.on("exit", (code) => process.exit(code ?? 0));
+          return;
+        }
         process.stdout.write(
-          `\nattaching to Claude session (Ctrl-B then d to detach; agents keep running)\n\n`,
+          `\nattaching to side-by-side view (Ctrl-B then d to detach; agents keep running)\n` +
+            `tip: 'ai-orchestra hide' / 'ai-orchestra show' toggle the codex+gemini panes\n\n`,
         );
-        // Replace this process's stdio with tmux attach so the user gets the TTY.
+        const tmuxAttach = spawnProc("tmux", ["attach", "-t", VIEW_SESSION], {
+          stdio: "inherit",
+        });
+        tmuxAttach.on("exit", (code) => process.exit(code ?? 0));
+        return;
+      }
+
+      if (opts.attach && opts.claude) {
+        // Single-agent path: attach straight to claude.
+        process.stdout.write(
+          `\nattaching to Claude session (Ctrl-B then d to detach)\n\n`,
+        );
         const tmuxAttach = spawnProc(
           "tmux",
           ["attach", "-t", adapters.CLAUDE.sessionName],
@@ -180,7 +225,7 @@ program
       }
 
       process.stdout.write(
-        `\nall set. attach manually with:  tmux attach -t ${adapters.CLAUDE.sessionName}\n`,
+        `\nall set. attach manually with:  ai-orchestra view\n`,
       );
     },
   );
@@ -560,6 +605,75 @@ task
       process.stdout.write(JSON.stringify(r) + "\n");
     },
   );
+
+program
+  .command("view")
+  .description("Attach to the side-by-side view (claude | codex | gemini). Creates it if needed.")
+  .option("-C, --cwd <dir>", "workspace root", process.cwd())
+  .option("--rebuild", "kill any existing view and recreate it")
+  .action(async (opts: { cwd: string; rebuild?: boolean }) => {
+    if (!(await TmuxSession.tmuxAvailable())) {
+      process.stderr.write("tmux is not installed or not on PATH\n");
+      process.exit(1);
+    }
+    const adapters = buildAdapters(resolve(opts.cwd));
+    const allAlive =
+      (await adapters.CLAUDE.isAlive()) &&
+      (await adapters.CODEX.isAlive()) &&
+      (await adapters.GEMINI.isAlive());
+    if (!allAlive) {
+      process.stderr.write(
+        "not all three agent sessions are alive; run 'ai-orchestra start' or 'ai-orchestra agent start <name>' first\n",
+      );
+      process.exit(1);
+    }
+    if (opts.rebuild || !(await viewExists())) {
+      await createView({
+        claudeSession: adapters.CLAUDE.sessionName,
+        codexSession: adapters.CODEX.sessionName,
+        geminiSession: adapters.GEMINI.sessionName,
+      });
+    }
+    const t = spawnProc("tmux", ["attach", "-t", VIEW_SESSION], { stdio: "inherit" });
+    t.on("exit", (code) => process.exit(code ?? 0));
+  });
+
+program
+  .command("hide")
+  .description("Hide the codex+gemini panes (zoom claude full-pane). Calling again restores.")
+  .action(async () => {
+    const r = await toggleSidekicks();
+    process.stdout.write(JSON.stringify(r) + "\n");
+  });
+
+program
+  .command("unhide")
+  .description("Reverse of 'hide'. Same underlying tmux toggle.")
+  .action(async () => {
+    const r = await toggleSidekicks();
+    process.stdout.write(JSON.stringify(r) + "\n");
+  });
+
+program
+  .command("resize-claude <pct>")
+  .description("Set claude pane width to N% of view (e.g. 70).")
+  .action(async (pct: string) => {
+    const n = Number.parseInt(pct, 10);
+    if (!Number.isFinite(n) || n <= 0 || n >= 100) {
+      process.stderr.write("pct must be an integer 1-99\n");
+      process.exit(1);
+    }
+    const r = await resizeClaude(n);
+    process.stdout.write(JSON.stringify(r) + "\n");
+  });
+
+program
+  .command("view-stop")
+  .description("Kill the view session (does not stop the agents).")
+  .action(async () => {
+    await killView();
+    process.stdout.write("view stopped (agents still running)\n");
+  });
 
 program
   .command("demo")

@@ -16,3 +16,4 @@ export * from "./execution-mode.js";
 export * from "./demo.js";
 export * from "./config.js";
 export * from "./observability.js";
+export * from "./view.js";
