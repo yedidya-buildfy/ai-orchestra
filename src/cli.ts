@@ -1,5 +1,7 @@
 import { Command } from "commander";
-import { resolve } from "node:path";
+import { resolve, dirname, join as pathJoin } from "node:path";
+import { fileURLToPath } from "node:url";
+import { readFileSync as readFileSyncPkg } from "node:fs";
 import { initWorkspace, paths, readBoard } from "./workspace.js";
 import { refreshContext, type RuntimeOverrides } from "./context-writer.js";
 import type { AgentName } from "./types.js";
@@ -32,7 +34,28 @@ import { join } from "node:path";
 
 const program = new Command();
 
-program.name("ai-orchestra").description("Self-refreshing multi-agent orchestration over Markdown.");
+function readPackageVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    // dist/cli.js → ../package.json
+    for (const candidate of [pathJoin(here, "..", "package.json"), pathJoin(here, "..", "..", "package.json")]) {
+      try {
+        const pkg = JSON.parse(readFileSyncPkg(candidate, "utf8"));
+        if (typeof pkg.version === "string") return pkg.version;
+      } catch {
+        // try next
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return "0.0.0";
+}
+
+program
+  .name("ai-orchestra")
+  .description("Self-refreshing multi-agent orchestration over Markdown.")
+  .version(readPackageVersion(), "-v, --version", "print the installed version");
 
 program
   .command("start")
