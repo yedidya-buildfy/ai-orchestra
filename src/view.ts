@@ -105,6 +105,32 @@ export async function createView(opts: CreateViewOptions): Promise<CreateViewRes
   await runTmux(["select-pane", "-t", `${VIEW_SESSION}:0.0`]);
   notes.push("3 panes created (claude | codex | gemini), equal split");
 
+  // UX polish:
+  //  - mouse on: click to focus a pane, drag dividers to resize
+  //  - title bar showing each agent name
+  //  - status bar shows the three labels so the user knows what's where
+  //  - hide the inner sessions' status bars to avoid stacked status lines
+  await runTmux(["set-option", "-t", VIEW_SESSION, "mouse", "on"]);
+  await runTmux(["set-option", "-t", VIEW_SESSION, "pane-border-status", "top"]);
+  await runTmux([
+    "set-option",
+    "-t",
+    VIEW_SESSION,
+    "pane-border-format",
+    " #{?pane_active,#[bold],}#{pane_index}: #{pane_title} ",
+  ]);
+  // Label panes so the border shows which agent is which.
+  await runTmux(["select-pane", "-t", `${VIEW_SESSION}:0.0`, "-T", "CLAUDE"]);
+  await runTmux(["select-pane", "-t", `${VIEW_SESSION}:0.1`, "-T", "CODEX"]);
+  await runTmux(["select-pane", "-t", `${VIEW_SESSION}:0.2`, "-T", "GEMINI"]);
+  await runTmux(["select-pane", "-t", `${VIEW_SESSION}:0.0`]);
+
+  // Hide each inner session's status bar so we don't get stacked status lines
+  // at the bottom (the nested attach normally shows its own).
+  for (const inner of [claudeSession, codexSession, geminiSession]) {
+    await runTmux(["set-option", "-t", inner, "status", "off"]);
+  }
+
   // Schedule the auto-shrink in a detached background shell so the
   // resize fires after the user has had a chance to glance at all three.
   if (autoShrinkMs > 0) {

@@ -258,8 +258,16 @@ program
           return;
         }
         process.stdout.write(
-          `\nattaching to side-by-side view (Ctrl-B then d to detach; agents keep running)\n` +
-            `tip: 'ai-orchestra hide' / 'ai-orchestra show' toggle the codex+gemini panes\n\n`,
+          [
+            "",
+            "attaching to side-by-side view.",
+            "  switch panes:    Ctrl-B then arrow keys, or click with mouse",
+            "  resize panes:    drag the divider with the mouse",
+            "  zoom one pane:   Ctrl-B then z   (toggle full-screen)",
+            "  detach:          Ctrl-B then d   (agents keep running)",
+            "  re-attach later: ai-orchestra view",
+            "",
+          ].join("\n"),
         );
         const tmuxAttach = spawnProc("tmux", ["attach", "-t", VIEW_SESSION], {
           stdio: "inherit",
