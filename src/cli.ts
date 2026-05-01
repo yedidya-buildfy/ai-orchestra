@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 import { initWorkspace, paths, readBoard } from "./workspace.js";
 import { refreshContext, type RuntimeOverrides } from "./context-writer.js";
 import type { AgentName } from "./types.js";
-import { buildAdapters, DEFAULT_AGENT_CONFIG } from "./agent-adapter.js";
+import {
+  buildAdapters,
+  DEFAULT_AGENT_CONFIG,
+  YOLO_AGENT_CONFIG,
+} from "./agent-adapter.js";
 import { TmuxSession } from "./tmux.js";
 import { Orchestrator } from "./orchestrator.js";
 import { refreshAgent, refreshSweep, type RefreshReason } from "./refresh.js";
@@ -29,6 +33,134 @@ import { join } from "node:path";
 const program = new Command();
 
 program.name("ai-orchestra").description("Self-refreshing multi-agent orchestration over Markdown.");
+
+program
+  .command("start")
+  .description(
+    "One-shot launch: bring up all three agents with bypass/yolo flags and attach you to the Claude UI. Codex + Gemini run in the background; the watcher daemon can also be started so the orchestrator dispatches automatically.",
+  )
+  .option("-C, --cwd <dir>", "workspace root", process.cwd())
+  .option("--no-claude", "skip starting Claude")
+  .option("--no-codex", "skip starting Codex")
+  .option("--no-gemini", "skip starting Gemini")
+  .option("--no-attach", "do not auto-attach to the Claude tmux session")
+  .option("--no-daemon", "do not start the watcher daemon")
+  .option(
+    "--claude-cmd <cmd>",
+    "override Claude launch command (default: claude --dangerously-skip-permissions)",
+  )
+  .option(
+    "--codex-cmd <cmd>",
+    "override Codex launch command (default: codex --full-auto)",
+  )
+  .option(
+    "--gemini-cmd <cmd>",
+    "override Gemini launch command (default: gemini --yolo)",
+  )
+  .action(
+    async (opts: {
+      cwd: string;
+      claude: boolean;
+      codex: boolean;
+      gemini: boolean;
+      attach: boolean;
+      daemon: boolean;
+      claudeCmd?: string;
+      codexCmd?: string;
+      geminiCmd?: string;
+    }) => {
+      const root = resolve(opts.cwd);
+
+      if (!(await TmuxSession.tmuxAvailable())) {
+        process.stderr.write("tmux is not installed or not on PATH\n");
+        process.exit(1);
+      }
+
+      // Init workspace if missing.
+      const p = paths(root);
+      if (!existsSync(p.root)) {
+        await initWorkspace(root);
+        process.stdout.write(`initialized .orchestra/ at ${p.root}\n`);
+      }
+
+      // Build adapters with YOLO defaults, allowing CLI overrides.
+      const cfg = {
+        CLAUDE: { command: opts.claudeCmd ?? YOLO_AGENT_CONFIG.CLAUDE.command },
+        CODEX: { command: opts.codexCmd ?? YOLO_AGENT_CONFIG.CODEX.command },
+        GEMINI: { command: opts.geminiCmd ?? YOLO_AGENT_CONFIG.GEMINI.command },
+      };
+      const adapters = buildAdapters(root, cfg);
+
+      const wanted: AgentName[] = [];
+      if (opts.codex) wanted.push("CODEX");
+      if (opts.gemini) wanted.push("GEMINI");
+      if (opts.claude) wanted.push("CLAUDE");
+
+      for (const a of wanted) {
+        const ad = adapters[a];
+        if (await ad.isAlive()) {
+          process.stdout.write(`agent ${a} already alive (session ${ad.sessionName})\n`);
+          continue;
+        }
+        try {
+          await ad.spawn();
+          process.stdout.write(
+            `agent ${a} started (session ${ad.sessionName}): ${ad.tmux.command}\n`,
+          );
+        } catch (e) {
+          process.stderr.write(`agent ${a} failed: ${(e as Error).message}\n`);
+        }
+      }
+
+      // Start the watcher daemon (unless --no-daemon).
+      if (opts.daemon) {
+        const pidFile = join(p.logsDir, "orchestrator.pid");
+        let alreadyRunning = false;
+        if (existsSync(pidFile)) {
+          const old = Number(readFileSync(pidFile, "utf8").trim());
+          if (Number.isFinite(old)) {
+            try {
+              process.kill(old, 0);
+              alreadyRunning = true;
+            } catch {
+              /* stale */
+            }
+          }
+        }
+        if (!alreadyRunning) {
+          const child = spawnProc(process.execPath, [process.argv[1]!, "watch", "-C", root], {
+            detached: true,
+            stdio: ["ignore", "ignore", "ignore"],
+            env: { ...process.env, ORCHESTRA_DAEMON: "1" },
+          });
+          child.unref();
+          writeFileSync(pidFile, String(child.pid) + "\n", "utf8");
+          process.stdout.write(`daemon started (pid ${child.pid})\n`);
+        } else {
+          process.stdout.write("daemon already running\n");
+        }
+      }
+
+      // Attach to Claude's tmux session for the user's UI (unless --no-attach).
+      if (opts.attach && opts.claude) {
+        process.stdout.write(
+          `\nattaching to Claude session (Ctrl-B then d to detach; agents keep running)\n\n`,
+        );
+        // Replace this process's stdio with tmux attach so the user gets the TTY.
+        const tmuxAttach = spawnProc(
+          "tmux",
+          ["attach", "-t", adapters.CLAUDE.sessionName],
+          { stdio: "inherit" },
+        );
+        tmuxAttach.on("exit", (code) => process.exit(code ?? 0));
+        return;
+      }
+
+      process.stdout.write(
+        `\nall set. attach manually with:  tmux attach -t ${adapters.CLAUDE.sessionName}\n`,
+      );
+    },
+  );
 
 program
   .command("init")

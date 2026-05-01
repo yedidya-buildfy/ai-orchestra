@@ -29,7 +29,31 @@ Requirements: Node ≥ 20, tmux, and the `claude`, `codex`, and `gemini` CLIs
 on `PATH` (the agents themselves use your existing subscriptions; this tool
 does **not** call any API directly).
 
-## Quickstart
+## Quickstart — one command
+
+```bash
+cd ~/projects/myapp
+ai-orchestra start
+```
+
+That single command:
+1. Scaffolds `.orchestra/` if it isn't there yet.
+2. Spawns **Codex** (`codex --full-auto`) and **Gemini** (`gemini --yolo`) in background tmux sessions.
+3. Spawns **Claude** (`claude --dangerously-skip-permissions`) in tmux.
+4. Starts the watcher daemon so the orchestrator dispatches automatically.
+5. Attaches you to the Claude tmux session — you see Claude Code's UI directly.
+
+Detach with `Ctrl-B d` (the agents keep running). Re-attach later with `tmux attach -t claude`.
+
+Useful flags:
+```bash
+ai-orchestra start --no-attach     # spawn everything but stay in your shell
+ai-orchestra start --no-daemon     # no auto-dispatch loop
+ai-orchestra start --no-codex      # leave Codex out of this run
+ai-orchestra start --claude-cmd 'claude'  # don't pass the bypass flag
+```
+
+## Manual quickstart (if you want finer control)
 
 ```bash
 ai-orchestra init                  # scaffold .orchestra/

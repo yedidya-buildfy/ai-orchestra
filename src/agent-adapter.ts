@@ -57,6 +57,24 @@ export const DEFAULT_AGENT_CONFIG: AdapterFactoryConfig = {
   GEMINI: { command: "gemini" },
 };
 
+/**
+ * "Yolo" preset — what the `ai-orchestra start` one-shot command uses.
+ * All three agents launch with their respective auto-approve / bypass flags
+ * so the orchestrator can dispatch unattended without the agents stopping
+ * on every action to ask for permission.
+ *
+ * - claude --dangerously-skip-permissions  (Claude Code's bypass mode)
+ * - codex  --full-auto                     (Codex CLI auto-approve)
+ * - gemini --yolo                          (Gemini CLI yolo mode)
+ *
+ * Override per-agent in `.orchestra/config.json` -> `agents.<NAME>.command`.
+ */
+export const YOLO_AGENT_CONFIG: AdapterFactoryConfig = {
+  CLAUDE: { command: "claude --dangerously-skip-permissions" },
+  CODEX: { command: "codex --full-auto" },
+  GEMINI: { command: "gemini --yolo" },
+};
+
 /** Base implementation common to all three adapters. */
 abstract class BaseAdapter implements AgentAdapter {
   readonly agent: AgentName;
