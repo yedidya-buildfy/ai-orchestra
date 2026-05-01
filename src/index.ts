@@ -17,3 +17,5 @@ export * from "./demo.js";
 export * from "./config.js";
 export * from "./observability.js";
 export * from "./view.js";
+export * from "./warmup.js";
+export * from "./updater.js";

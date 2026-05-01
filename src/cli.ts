@@ -30,6 +30,8 @@ import {
   viewExists,
   VIEW_SESSION,
 } from "./view.js";
+import { warmupAgent } from "./warmup.js";
+import { DEFAULT_UPDATE_CMDS, updateAll } from "./updater.js";
 import {
   configPath,
   DEFAULT_CONFIG,
@@ -169,6 +171,36 @@ program
           process.stdout.write(`daemon started (pid ${child.pid})\n`);
         } else {
           process.stdout.write("daemon already running\n");
+        }
+      }
+
+      // Auto-warmup: dismiss "trust this folder?" / update prompts for any
+      // agent we just spawned. Run in parallel; ignore errors so a slow
+      // CLI never blocks the rest of the boot sequence.
+      const justSpawned = wanted.filter((a) => adapters[a].sessionName);
+      if (justSpawned.length > 0) {
+        process.stdout.write(`auto-answering setup prompts...\n`);
+        const results = await Promise.all(
+          justSpawned.map((a) =>
+            warmupAgent(adapters[a]).catch((e) => ({
+              agent: a,
+              responded: [],
+              rounds: 0,
+              durationMs: 0,
+              error: (e as Error).message,
+            })),
+          ),
+        );
+        for (const r of results) {
+          if (r.responded.length > 0) {
+            process.stdout.write(
+              `  ${r.agent}: ${r.responded
+                .map((x) => `${x.description}=${x.sent}`)
+                .join(", ")}\n`,
+            );
+          } else {
+            process.stdout.write(`  ${r.agent}: no prompts detected\n`);
+          }
         }
       }
 
@@ -603,6 +635,76 @@ task
         opts.notes,
       );
       process.stdout.write(JSON.stringify(r) + "\n");
+    },
+  );
+
+program
+  .command("warmup [agent]")
+  .description(
+    "Re-run the trust/update prompt auto-answer for an agent (or all three if omitted).",
+  )
+  .option("-C, --cwd <dir>", "workspace root", process.cwd())
+  .action(async (agent: string | undefined, opts: { cwd: string }) => {
+    const root = resolve(opts.cwd);
+    const adapters = buildAdapters(root);
+    const targets: AgentName[] = agent
+      ? [agent.toUpperCase() as AgentName]
+      : ["CLAUDE", "CODEX", "GEMINI"];
+    for (const t of targets) {
+      if (!(await adapters[t].isAlive())) {
+        process.stderr.write(`${t}: not alive — start it first\n`);
+        continue;
+      }
+      const r = await warmupAgent(adapters[t]);
+      process.stdout.write(`${t}: ${JSON.stringify(r)}\n`);
+    }
+  });
+
+program
+  .command("update-clis")
+  .description("npm-update the agent CLIs (claude, codex, gemini).")
+  .option("--claude-only", "update Claude only")
+  .option("--codex-only", "update Codex only")
+  .option("--gemini-only", "update Gemini only")
+  .option("--print", "print the commands instead of running them")
+  .action(
+    async (opts: {
+      claudeOnly?: boolean;
+      codexOnly?: boolean;
+      geminiOnly?: boolean;
+      print?: boolean;
+    }) => {
+      let selected: AgentName[] = ["CLAUDE", "CODEX", "GEMINI"];
+      if (opts.claudeOnly) selected = ["CLAUDE"];
+      else if (opts.codexOnly) selected = ["CODEX"];
+      else if (opts.geminiOnly) selected = ["GEMINI"];
+
+      if (opts.print) {
+        for (const a of selected) {
+          process.stdout.write(`${a}: ${DEFAULT_UPDATE_CMDS[a]}\n`);
+        }
+        return;
+      }
+
+      process.stdout.write(`updating: ${selected.join(", ")}...\n`);
+      const results = await updateAll(selected);
+      let allOk = true;
+      for (const r of results) {
+        const mark = r.ok ? "[ok]" : "[!!]";
+        process.stdout.write(
+          `${mark} ${r.agent} (${r.durationMs}ms): ${r.command}\n`,
+        );
+        if (!r.ok) {
+          allOk = false;
+          if (r.stderrTail) process.stdout.write(`     ${r.stderrTail}\n`);
+        }
+      }
+      process.stdout.write(
+        allOk
+          ? "\nall agent CLIs updated. Restart agents with 'ai-orchestra refresh <name>' or 'ai-orchestra start'.\n"
+          : "\nsome updates failed; see stderr above\n",
+      );
+      process.exit(allOk ? 0 : 1);
     },
   );
 
