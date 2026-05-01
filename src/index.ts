@@ -19,3 +19,4 @@ export * from "./observability.js";
 export * from "./view.js";
 export * from "./warmup.js";
 export * from "./updater.js";
+export * from "./trust.js";

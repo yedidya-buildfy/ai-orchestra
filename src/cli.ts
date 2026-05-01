@@ -32,6 +32,7 @@ import {
 } from "./view.js";
 import { warmupAgent } from "./warmup.js";
 import { DEFAULT_UPDATE_CMDS, updateAll } from "./updater.js";
+import { trustPath } from "./trust.js";
 import {
   configPath,
   DEFAULT_CONFIG,
@@ -90,6 +91,8 @@ program
     "--gemini-cmd <cmd>",
     "override Gemini launch command (default: gemini --yolo)",
   )
+  .option("--no-trust", "skip pre-trusting the cwd in each CLI's config")
+  .option("--auto-update", "run 'update-clis' before spawning so agents start on the latest version")
   .action(
     async (opts: {
       cwd: string;
@@ -98,6 +101,8 @@ program
       gemini: boolean;
       attach: boolean;
       daemon: boolean;
+      trust: boolean;
+      autoUpdate?: boolean;
       claudeCmd?: string;
       codexCmd?: string;
       geminiCmd?: string;
@@ -114,6 +119,27 @@ program
       if (!existsSync(p.root)) {
         await initWorkspace(root);
         process.stdout.write(`initialized .orchestra/ at ${p.root}\n`);
+      }
+
+      // Pre-trust the cwd in each CLI's config file. Idempotent; this
+      // suppresses the "trust this folder?" prompt on every future run.
+      if (opts.trust) {
+        const trustResults = await trustPath(root);
+        for (const t of trustResults) {
+          if (t.changed) {
+            process.stdout.write(`trust ${t.agent}: ${t.detail}\n`);
+          }
+        }
+      }
+
+      // Optional: pull latest CLI versions before spawning.
+      if (opts.autoUpdate) {
+        process.stdout.write(`updating agent CLIs first (--auto-update)...\n`);
+        const ur = await updateAll(["CLAUDE", "CODEX", "GEMINI"]);
+        for (const r of ur) {
+          const mark = r.ok ? "[ok]" : "[!!]";
+          process.stdout.write(`  ${mark} ${r.agent} (${r.durationMs}ms)\n`);
+        }
       }
 
       // Build adapters with YOLO defaults, allowing CLI overrides.
@@ -637,6 +663,20 @@ task
       process.stdout.write(JSON.stringify(r) + "\n");
     },
   );
+
+program
+  .command("trust [path]")
+  .description(
+    "Pre-trust a path in Claude/Codex/Gemini config files so the 'trust this folder?' prompt never appears.",
+  )
+  .action(async (pathArg: string | undefined) => {
+    const target = resolve(pathArg ?? process.cwd());
+    const results = await trustPath(target);
+    for (const r of results) {
+      const mark = r.changed ? "[+]" : "[=]";
+      process.stdout.write(`${mark} ${r.agent.padEnd(7)} ${r.configPath}: ${r.detail}\n`);
+    }
+  });
 
 program
   .command("warmup [agent]")
