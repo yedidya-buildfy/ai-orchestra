@@ -24,41 +24,58 @@ function tailLines(s: string, n = 10): string {
   return s.split("\n").slice(-n).join("\n").trim();
 }
 
-export async function updateOne(
-  agent: AgentName,
-  command: string = DEFAULT_UPDATE_CMDS[agent],
-): Promise<UpdateResult> {
+function runShell(command: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const start = Date.now();
-    const child = spawn(command, {
-      shell: "/bin/sh",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(command, { shell: "/bin/sh", stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (b) => (stdout += b.toString("utf8")));
     child.stderr.on("data", (b) => (stderr += b.toString("utf8")));
-    child.on("close", (code) =>
-      resolve({
-        agent,
-        command,
-        ok: code === 0,
-        stdoutTail: tailLines(stdout),
-        stderrTail: tailLines(stderr),
-        durationMs: Date.now() - start,
-      }),
-    );
-    child.on("error", (e) =>
-      resolve({
-        agent,
-        command,
-        ok: false,
-        stdoutTail: "",
-        stderrTail: e.message,
-        durationMs: Date.now() - start,
-      }),
-    );
+    child.on("close", (code) => resolve({ ok: code === 0, stdout, stderr }));
+    child.on("error", (e) => resolve({ ok: false, stdout: "", stderr: e.message }));
   });
+}
+
+/** Add `--force` to an `npm install -g` command (idempotent). */
+function withForce(command: string): string {
+  if (/--force\b/.test(command)) return command;
+  if (/\bnpm\s+(install|i)\b.*\s-g\b/.test(command)) {
+    return command.replace(/\bnpm\s+(install|i)\b/, "npm $1 --force");
+  }
+  return command;
+}
+
+export async function updateOne(
+  agent: AgentName,
+  command: string = DEFAULT_UPDATE_CMDS[agent],
+): Promise<UpdateResult> {
+  const start = Date.now();
+  let r = await runShell(command);
+
+  // If npm refuses because a symlink/binary is squatting the path, transparently
+  // retry once with --force. EEXIST on a global bin is the canonical case where
+  // a user originally installed the tool via brew/another npm package — and
+  // they explicitly asked us to update it, so overwriting is the intent.
+  if (!r.ok && /EEXIST|already exists/i.test(r.stderr)) {
+    const forced = withForce(command);
+    if (forced !== command) {
+      const r2 = await runShell(forced);
+      r = {
+        ok: r2.ok,
+        stdout: r2.stdout || r.stdout,
+        stderr: r2.ok ? `(retried with --force)\n${r2.stderr}` : `${r.stderr}\n--retry-with-force--\n${r2.stderr}`,
+      };
+    }
+  }
+
+  return {
+    agent,
+    command,
+    ok: r.ok,
+    stdoutTail: tailLines(r.stdout),
+    stderrTail: tailLines(r.stderr),
+    durationMs: Date.now() - start,
+  };
 }
 
 export async function updateAll(

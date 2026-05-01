@@ -29,6 +29,33 @@ describe("updateOne", () => {
   });
 });
 
+describe("EEXIST retry path", () => {
+  it("when stderr says EEXIST, second attempt runs a forced version of the same command", async () => {
+    const { mkdtempSync, writeFileSync, chmodSync, existsSync } = await import(
+      "node:fs"
+    );
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(`${tmpdir()}/orch-up-`);
+    const marker = `${dir}/forced-ran`;
+    const stub = `${dir}/fake-npm.sh`;
+    writeFileSync(
+      stub,
+      `#!/bin/sh
+case "$*" in
+  *--force*) touch ${marker} ; exit 0 ;;
+  *) echo 'npm error code EEXIST: file already exists' >&2 ; exit 1 ;;
+esac
+`,
+    );
+    chmodSync(stub, 0o755);
+    // Use a real npm-style command shape so withForce() injects --force.
+    const r = await updateOne("CODEX", `${stub} npm install -g @openai/codex`);
+    expect(existsSync(marker)).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.stderrTail).toMatch(/retried with --force/);
+  });
+});
+
 describe("updateAll", () => {
   it("runs all selected agents and accepts overrides", async () => {
     const results = await updateAll(["CLAUDE", "CODEX"], {
