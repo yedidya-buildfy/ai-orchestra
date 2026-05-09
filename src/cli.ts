@@ -52,6 +52,24 @@ import {
 import { spawn as spawnProc } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, promises as fsp } from "node:fs";
 import { join } from "node:path";
+import { createInterface } from "node:readline/promises";
+
+/**
+ * Ask a y/n question on stdin. Returns the user's choice, or `defaultYes`
+ * when stdin isn't a TTY (so CI / scripted runs don't hang on a prompt).
+ */
+async function confirmYesNo(question: string, defaultYes: boolean): Promise<boolean> {
+  if (!process.stdin.isTTY) return defaultYes;
+  const suffix = defaultYes ? " [Y/n] " : " [y/N] ";
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const raw = (await rl.question(question + suffix)).trim().toLowerCase();
+    if (raw === "") return defaultYes;
+    return raw === "y" || raw === "yes";
+  } finally {
+    rl.close();
+  }
+}
 
 const program = new Command();
 
@@ -336,11 +354,13 @@ program
 program
   .command("init")
   .description(
-    "Open this directory as an AI Orchestra workspace. If .orchestra/ already exists, picks up the existing state (board / memory / changelog) and brings the three agents up to it. Otherwise scaffolds a fresh workspace from templates and starts. Use --scaffold-only to create the files without spawning. Use --force to wipe and re-scaffold (DESTRUCTIVE).",
+    "Open this directory as an AI Orchestra workspace. If .orchestra/ already exists, picks up the existing state (board / memory / changelog) and asks whether to resume the last claude/codex/gemini conversations or start fresh ones. Otherwise scaffolds from templates and starts. Use --scaffold-only to create files without spawning. Use --force to wipe and re-scaffold (DESTRUCTIVE).",
   )
   .option("-f, --force", "wipe an existing .orchestra/ and re-scaffold from templates (destroys board/memory/changelog)", false)
   .option("-C, --cwd <dir>", "directory to initialize in", process.cwd())
   .option("--scaffold-only", "only create/refresh the .orchestra/ files; do not spawn agents", false)
+  .option("-y, --yes", "skip the resume-or-fresh prompt; default-Yes (resume the last conversations). Use --fresh to default to No instead.", false)
+  .option("--fresh", "do not resume previous conversations even if available — spawn each CLI in a brand new chat (memory.md / board.md still rehydrate via the bootstrap)", false)
   .option("--no-claude", "skip starting Claude")
   .option("--no-codex", "skip starting Codex")
   .option("--no-gemini", "skip starting Gemini")
@@ -364,6 +384,8 @@ program
     force: boolean;
     cwd: string;
     scaffoldOnly: boolean;
+    yes: boolean;
+    fresh: boolean;
     claude: boolean;
     codex: boolean;
     gemini: boolean;
@@ -398,6 +420,43 @@ program
     }
 
     if (opts.scaffoldOnly) return;
+
+    // Decide whether to resume the last per-CLI conversation IDs. Only
+    // relevant when:
+    //   - .orchestra/ already existed before this run (so prior conversations
+    //     could exist in claude/codex/gemini's session stores)
+    //   - --force wasn't used (a fresh scaffold has no prior session to resume)
+    //   - --scaffold-only wasn't used (we're spawning agents)
+    let resumeChoice = false;
+    let resumeIds: AgentSessionIds = { CLAUDE: null, CODEX: null, GEMINI: null };
+    if (wsExists && !opts.force) {
+      resumeIds = await findAgentSessions(root);
+      const haveAny =
+        resumeIds.CLAUDE !== null ||
+        resumeIds.CODEX !== null ||
+        resumeIds.GEMINI !== null;
+
+      if (!haveAny) {
+        // Nothing to resume — first time the agents run in this dir.
+        resumeChoice = false;
+      } else if (opts.fresh) {
+        resumeChoice = false;
+        process.stdout.write(`--fresh: starting new conversations (memory still loads)\n`);
+      } else if (opts.yes) {
+        resumeChoice = true;
+        process.stdout.write(`--yes: resuming the last conversations\n`);
+      } else {
+        // Interactive: ask the user.
+        const found: string[] = [];
+        if (resumeIds.CLAUDE) found.push("claude");
+        if (resumeIds.CODEX) found.push("codex");
+        if (resumeIds.GEMINI) found.push("gemini");
+        const summary = `found prior conversation${found.length === 1 ? "" : "s"} for: ${found.join(", ")}`;
+        process.stdout.write(`${summary}\n`);
+        resumeChoice = await confirmYesNo("Continue last shared session?", true);
+      }
+    }
+
     const startOpts: StartOpts = {
       cwd: root,
       claude: opts.claude,
@@ -411,6 +470,26 @@ program
     if (opts.claudeCmd !== undefined) startOpts.claudeCmd = opts.claudeCmd;
     if (opts.codexCmd !== undefined) startOpts.codexCmd = opts.codexCmd;
     if (opts.geminiCmd !== undefined) startOpts.geminiCmd = opts.geminiCmd;
+
+    if (resumeChoice) {
+      // Build per-CLI commands that include each agent's --resume <last-uuid>.
+      // Don't override commands the user already supplied via --<agent>-cmd.
+      if (startOpts.claudeCmd === undefined && resumeIds.CLAUDE) {
+        startOpts.claudeCmd = buildYoloResumeCommand("CLAUDE", resumeIds.CLAUDE);
+      }
+      if (startOpts.codexCmd === undefined && resumeIds.CODEX) {
+        startOpts.codexCmd = buildYoloResumeCommand("CODEX", resumeIds.CODEX);
+      }
+      if (startOpts.geminiCmd === undefined && resumeIds.GEMINI) {
+        startOpts.geminiCmd = buildYoloResumeCommand("GEMINI", resumeIds.GEMINI);
+      }
+      const resuming: string[] = [];
+      if (resumeIds.CLAUDE) resuming.push(`claude=${resumeIds.CLAUDE.slice(0, 8)}`);
+      if (resumeIds.CODEX) resuming.push(`codex=${resumeIds.CODEX.slice(0, 8)}`);
+      if (resumeIds.GEMINI) resuming.push(`gemini=${resumeIds.GEMINI.slice(0, 8)}`);
+      process.stdout.write(`resuming: ${resuming.join(", ")}\n`);
+    }
+
     await runStart(startOpts);
   });
 
