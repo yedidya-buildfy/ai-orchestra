@@ -73,6 +73,31 @@ orc daemon                # run the watcher in the background
 orc status                # board / context / agents at a glance
 ```
 
+## Named sessions — pick up where you left off
+
+Each agent's CLI keeps its own conversation history (Claude in `~/.claude/projects/…`,
+Codex in `~/.codex/sessions/…`, Gemini in `~/.gemini/tmp/…`). `orc rename` snapshots
+the most-recent UUID for each one in your current workspace, and `orc resume` re-spawns
+all three with their respective `--resume <id>` flag — so the agents come back with
+their actual chat history, not just the `.orchestra/` memory.
+
+```bash
+# from your project, after a session has run for a while:
+orc rename "fixing-zip-bug"
+
+# days later, from any directory:
+orc list
+# NAME            LAST USED            DIR
+# fixing-zip-bug  2026-05-09 22:14:00  /Users/me/projects/myapp
+
+orc resume "fixing-zip-bug"   # cd's into the workspace and brings everyone back
+orc forget "fixing-zip-bug"   # remove the registry entry (workspace untouched)
+```
+
+The registry lives at `~/.config/orc/sessions.json` (or `$XDG_CONFIG_HOME/orc/sessions.json`).
+If a CLI hadn't been run yet at rename time, that agent simply gets a fresh spawn on resume —
+the `.orchestra/` memory still rehydrates context.
+
 ## Architecture
 
 ```
@@ -108,6 +133,7 @@ Threshold bands (PRD §10):
 | | |
 |---|---|
 | `init` / `paths` / `show` | scaffolding + introspection |
+| `rename <name>` / `resume <name>` / `list` / `forget <name>` | named sessions — capture per-CLI conversation IDs and replay them later |
 | `context [--runtime-* N] [--dry-run] [--json]` | measure + persist context health |
 | `agent start|stop|status|send` | tmux session lifecycle |
 | `tick` / `watch` / `daemon` / `daemon-stop` | orchestration loop |

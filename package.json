@@ -1,6 +1,6 @@
 {
   "name": "@yedidya-dan/ai-orchestra",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Self-refreshing, token-aware multi-agent orchestration over Markdown.",
   "repository": {
     "type": "git",

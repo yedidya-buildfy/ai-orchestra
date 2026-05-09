@@ -63,17 +63,47 @@ export const DEFAULT_AGENT_CONFIG: AdapterFactoryConfig = {
  * so the orchestrator can dispatch unattended without the agents stopping
  * on every action to ask for permission.
  *
- * - claude --dangerously-skip-permissions  (Claude Code's bypass mode)
- * - codex  --full-auto                     (Codex CLI auto-approve)
- * - gemini --yolo                          (Gemini CLI yolo mode)
+ * - claude --dangerously-skip-permissions               (Claude Code's bypass mode)
+ * - codex  --dangerously-bypass-approvals-and-sandbox   (Codex CLI YOLO; replaces the
+ *                                                        deprecated `--full-auto`,
+ *                                                        which was removed from the
+ *                                                        top-level codex parser in 0.128+)
+ * - gemini --yolo                                       (Gemini CLI yolo mode)
  *
  * Override per-agent in `.orchestra/config.json` -> `agents.<NAME>.command`.
  */
 export const YOLO_AGENT_CONFIG: AdapterFactoryConfig = {
   CLAUDE: { command: "claude --dangerously-skip-permissions" },
-  CODEX: { command: "codex --full-auto" },
+  CODEX: { command: "codex --dangerously-bypass-approvals-and-sandbox" },
   GEMINI: { command: "gemini --yolo" },
 };
+
+/**
+ * Build the YOLO command for an agent that should resume a specific
+ * conversation by ID. Used by `orc resume` to spawn each CLI with both its
+ * bypass flag AND its resume flag/subcommand. Returns the original YOLO
+ * command unchanged when no session ID is available, so a partial registry
+ * (one agent never ran) gracefully falls back to a fresh spawn.
+ */
+export function buildYoloResumeCommand(
+  agent: AgentName,
+  sessionId: string | null,
+): string {
+  const base = YOLO_AGENT_CONFIG[agent].command;
+  if (!sessionId) return base;
+  switch (agent) {
+    case "CLAUDE":
+      // claude --dangerously-skip-permissions --resume <uuid>
+      return `${base} --resume ${sessionId}`;
+    case "GEMINI":
+      // gemini --yolo --resume <full-uuid>
+      return `${base} --resume ${sessionId}`;
+    case "CODEX":
+      // codex resume <uuid> --dangerously-bypass-approvals-and-sandbox
+      // (sandbox flag must come AFTER the subcommand, not before, on 0.128+)
+      return `codex resume ${sessionId} --dangerously-bypass-approvals-and-sandbox`;
+  }
+}
 
 /** Base implementation common to all three adapters. */
 abstract class BaseAdapter implements AgentAdapter {

@@ -7,9 +7,18 @@ import { refreshContext, type RuntimeOverrides } from "./context-writer.js";
 import type { AgentName } from "./types.js";
 import {
   buildAdapters,
+  buildYoloResumeCommand,
   DEFAULT_AGENT_CONFIG,
   YOLO_AGENT_CONFIG,
 } from "./agent-adapter.js";
+import { findAgentSessions, type AgentSessionIds } from "./conversation-finder.js";
+import {
+  getSession,
+  listSessions,
+  removeSession,
+  setSession,
+  touchSession,
+} from "./registry.js";
 import { TmuxSession } from "./tmux.js";
 import { Orchestrator } from "./orchestrator.js";
 import { refreshAgent, refreshSweep, type RefreshReason } from "./refresh.js";
@@ -288,7 +297,7 @@ program
   )
   .option(
     "--codex-cmd <cmd>",
-    "override Codex launch command (default: codex --full-auto)",
+    "override Codex launch command (default: codex --dangerously-bypass-approvals-and-sandbox)",
   )
   .option(
     "--gemini-cmd <cmd>",
@@ -325,6 +334,123 @@ program
       daemon: true,
       trust: true,
     });
+  });
+
+program
+  .command("rename <name>")
+  .description(
+    "Save the current workspace under a name so `orc resume <name>` can re-open it later. Captures the most-recent claude/codex/gemini conversation IDs in this cwd so the three agents resume their actual chats, not just fresh sessions.",
+  )
+  .option("-C, --cwd <dir>", "workspace root", process.cwd())
+  .action(async (name: string, opts: { cwd: string }) => {
+    const root = resolve(opts.cwd);
+    if (!existsSync(paths(root).root)) {
+      process.stderr.write(
+        `no .orchestra/ at ${root} — run 'orc init' here first, then start a session before naming it\n`,
+      );
+      process.exit(1);
+    }
+    const ids = await findAgentSessions(root);
+    const found = (Object.values(ids) as Array<string | null>).filter((v) => v !== null);
+    if (found.length === 0) {
+      process.stderr.write(
+        `no claude/codex/gemini conversations found in ${root}\n` +
+          `  (each CLI must have run at least once in this dir for orc to capture an ID)\n`,
+      );
+      process.exit(1);
+    }
+    const existing = await getSession(name);
+    const now = new Date().toISOString();
+    await setSession(name, {
+      dir: root,
+      createdAt: existing?.createdAt ?? now,
+      lastUsed: now,
+      agentSessions: ids,
+    });
+    process.stdout.write(`saved '${name}' → ${root}\n`);
+    for (const a of ["CLAUDE", "CODEX", "GEMINI"] as const) {
+      const id = ids[a];
+      process.stdout.write(`  ${a.padEnd(7)} ${id ?? "(none — will spawn fresh on resume)"}\n`);
+    }
+  });
+
+program
+  .command("resume <name>")
+  .description(
+    "Resume a previously named session: cd into its workspace and bring up claude/codex/gemini with each one's --resume flag pointed at the captured conversation IDs.",
+  )
+  .option("--no-attach", "do not auto-attach to the Claude tmux session")
+  .option("--no-daemon", "do not start the watcher daemon")
+  .action(async (name: string, opts: { attach: boolean; daemon: boolean }) => {
+    const entry = await getSession(name);
+    if (!entry) {
+      process.stderr.write(
+        `no session named '${name}'. run 'orc list' to see available sessions.\n`,
+      );
+      process.exit(1);
+    }
+    if (!existsSync(paths(entry.dir).root)) {
+      process.stderr.write(
+        `session '${name}' was bound to ${entry.dir}, but its .orchestra/ no longer exists.\n` +
+          `  fix: cd to a project that has it, or 'orc forget ${name}' if abandoned.\n`,
+      );
+      process.exit(1);
+    }
+    const ids: AgentSessionIds = entry.agentSessions;
+    process.stdout.write(`resuming '${name}' at ${entry.dir}\n`);
+    for (const a of ["CLAUDE", "CODEX", "GEMINI"] as const) {
+      const id = ids[a];
+      process.stdout.write(`  ${a.padEnd(7)} ${id ? `--resume ${id}` : "(fresh spawn)"}\n`);
+    }
+    await touchSession(name);
+    await runStart({
+      cwd: entry.dir,
+      claude: true,
+      codex: true,
+      gemini: true,
+      attach: opts.attach,
+      daemon: opts.daemon,
+      trust: true,
+      claudeCmd: buildYoloResumeCommand("CLAUDE", ids.CLAUDE),
+      codexCmd: buildYoloResumeCommand("CODEX", ids.CODEX),
+      geminiCmd: buildYoloResumeCommand("GEMINI", ids.GEMINI),
+    });
+  });
+
+program
+  .command("list")
+  .description("List all named sessions saved with `orc rename`, newest first.")
+  .option("--json", "raw JSON output")
+  .action(async (opts: { json?: boolean }) => {
+    const items = await listSessions();
+    if (opts.json) {
+      process.stdout.write(JSON.stringify(items, null, 2) + "\n");
+      return;
+    }
+    if (items.length === 0) {
+      process.stdout.write("no named sessions yet. use 'orc rename <name>' to save one.\n");
+      return;
+    }
+    const rows: string[][] = [["NAME", "LAST USED", "DIR"]];
+    for (const { name, entry } of items) {
+      rows.push([name, entry.lastUsed.replace("T", " ").slice(0, 19), entry.dir]);
+    }
+    const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
+    for (const r of rows) {
+      process.stdout.write(r.map((c, i) => c.padEnd(widths[i]!)).join("  ") + "\n");
+    }
+  });
+
+program
+  .command("forget <name>")
+  .description("Remove a named session from the registry. Does not touch .orchestra/ files.")
+  .action(async (name: string) => {
+    const ok = await removeSession(name);
+    if (!ok) {
+      process.stderr.write(`no session named '${name}'\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`forgot '${name}' (the workspace itself is untouched)\n`);
   });
 
 program
