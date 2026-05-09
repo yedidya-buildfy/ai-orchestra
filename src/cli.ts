@@ -50,7 +50,7 @@ import {
   writeConfig,
 } from "./config.js";
 import { spawn as spawnProc } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, promises as fsp } from "node:fs";
 import { join } from "node:path";
 
 const program = new Command();
@@ -305,11 +305,13 @@ program
   .version(readPackageVersion(), "-v, --version", "print the installed version");
 
 program
-  .command("start")
+  .command("init")
   .description(
-    "One-shot launch: bring up all three agents with bypass/yolo flags and attach you to the Claude UI. Codex + Gemini run in the background; the watcher daemon can also be started so the orchestrator dispatches automatically.",
+    "Open this directory as an AI Orchestra workspace. If .orchestra/ already exists, picks up the existing state (board / memory / changelog) and brings the three agents up to it. Otherwise scaffolds a fresh workspace from templates and starts. Use --scaffold-only to create the files without spawning. Use --force to wipe and re-scaffold (DESTRUCTIVE).",
   )
-  .option("-C, --cwd <dir>", "workspace root", process.cwd())
+  .option("-f, --force", "wipe an existing .orchestra/ and re-scaffold from templates (destroys board/memory/changelog)", false)
+  .option("-C, --cwd <dir>", "directory to initialize in", process.cwd())
+  .option("--scaffold-only", "only create/refresh the .orchestra/ files; do not spawn agents", false)
   .option("--no-claude", "skip starting Claude")
   .option("--no-codex", "skip starting Codex")
   .option("--no-gemini", "skip starting Gemini")
@@ -329,25 +331,134 @@ program
   )
   .option("--no-trust", "skip pre-trusting the cwd in each CLI's config")
   .option("--auto-update", "run 'update-clis' before spawning so agents start on the latest version")
-  .action(runStart);
+  .action(async (opts: {
+    force: boolean;
+    cwd: string;
+    scaffoldOnly: boolean;
+    claude: boolean;
+    codex: boolean;
+    gemini: boolean;
+    attach: boolean;
+    daemon: boolean;
+    trust: boolean;
+    autoUpdate?: boolean;
+    claudeCmd?: string;
+    codexCmd?: string;
+    geminiCmd?: string;
+  }) => {
+    const root = resolve(opts.cwd);
+    const p = paths(root);
+    const wsExists = existsSync(p.root);
+
+    if (wsExists && !opts.force) {
+      process.stdout.write(
+        `using existing .orchestra/ at ${p.root} (memory + board preserved)\n`,
+      );
+    } else {
+      try {
+        await initWorkspace(root, { force: opts.force });
+        process.stdout.write(
+          opts.force
+            ? `re-scaffolded .orchestra/ at ${p.root} (--force)\n`
+            : `initialized .orchestra/ at ${p.root}\n`,
+        );
+      } catch (e) {
+        process.stderr.write(`init failed: ${(e as Error).message}\n`);
+        process.exit(1);
+      }
+    }
+
+    if (opts.scaffoldOnly) return;
+    const startOpts: StartOpts = {
+      cwd: root,
+      claude: opts.claude,
+      codex: opts.codex,
+      gemini: opts.gemini,
+      attach: opts.attach,
+      daemon: opts.daemon,
+      trust: opts.trust,
+    };
+    if (opts.autoUpdate !== undefined) startOpts.autoUpdate = opts.autoUpdate;
+    if (opts.claudeCmd !== undefined) startOpts.claudeCmd = opts.claudeCmd;
+    if (opts.codexCmd !== undefined) startOpts.codexCmd = opts.codexCmd;
+    if (opts.geminiCmd !== undefined) startOpts.geminiCmd = opts.geminiCmd;
+    await runStart(startOpts);
+  });
 
 program
-  .command("init")
+  .command("clean")
   .description(
-    "Scaffold .orchestra/ in the current directory and immediately bring up the three agents (claude+codex+gemini) with the watcher daemon. Use --scaffold-only to skip spawning.",
+    "DESTRUCTIVE: wipe this workspace's .orchestra/ and re-scaffold it from templates, as if you ran 'orc init' on a fresh directory. Stops the daemon and kills the three agent tmux sessions plus the view first. board.md, memory.md, changelog.md, long_term.md, agents/, protocol.md, and metrics are all reset. Requires --yes.",
   )
-  .option("-f, --force", "overwrite if .orchestra/ already exists", false)
-  .option("-C, --cwd <dir>", "directory to initialize in", process.cwd())
-  .option("--scaffold-only", "only create the .orchestra/ files; do not spawn agents", false)
-  .action(async (opts: { force: boolean; cwd: string; scaffoldOnly: boolean }) => {
+  .option("-y, --yes", "skip confirmation; really do it", false)
+  .option("-C, --cwd <dir>", "workspace root", process.cwd())
+  .option("--scaffold-only", "after wiping, only re-create files; do not spawn agents", false)
+  .action(async (opts: { yes: boolean; cwd: string; scaffoldOnly: boolean }) => {
     const root = resolve(opts.cwd);
-    try {
-      const p = await initWorkspace(root, { force: opts.force });
-      process.stdout.write(`initialized .orchestra/ at ${p.root}\n`);
-    } catch (e) {
-      process.stderr.write(`init failed: ${(e as Error).message}\n`);
+    const p = paths(root);
+
+    if (!existsSync(p.root)) {
+      process.stderr.write(`no .orchestra/ at ${root} — nothing to clean.\n`);
       process.exit(1);
     }
+
+    if (!opts.yes) {
+      process.stderr.write(
+        [
+          "",
+          `orc clean will WIPE .orchestra/ at ${root} and reset to factory templates.`,
+          "  - board.md, memory.md, changelog.md, long_term.md will be lost",
+          "  - any running agents and the daemon will be killed",
+          "  - .orchestra/agents/, protocol.md, metrics, sessions, logs reset to defaults",
+          "",
+          "Re-run with --yes to confirm.",
+          "",
+        ].join("\n"),
+      );
+      process.exit(1);
+    }
+
+    // Stop the watcher daemon if running so it doesn't fight us writing
+    // to .orchestra/.
+    const pidFile = join(p.logsDir, "orchestrator.pid");
+    if (existsSync(pidFile)) {
+      const pid = Number(readFileSync(pidFile, "utf8").trim());
+      if (Number.isFinite(pid)) {
+        try {
+          process.kill(pid, "SIGTERM");
+          process.stdout.write(`stopped daemon (pid ${pid})\n`);
+        } catch {
+          /* already dead, fine */
+        }
+      }
+    }
+
+    // Kill all three agent tmux sessions plus the view. Each kill is best-
+    // effort — a dead/missing session just throws and we move on.
+    if (await TmuxSession.tmuxAvailable()) {
+      const adapters = buildAdapters(root);
+      for (const a of ["CLAUDE", "CODEX", "GEMINI"] as const) {
+        try {
+          if (await adapters[a].isAlive()) {
+            await adapters[a].kill();
+            process.stdout.write(`killed ${a} session\n`);
+          }
+        } catch {
+          /* not alive */
+        }
+      }
+      try {
+        await killView();
+      } catch {
+        /* not alive */
+      }
+    }
+
+    // Wipe everything and re-scaffold.
+    await fsp.rm(p.root, { recursive: true, force: true });
+    await initWorkspace(root);
+    process.stdout.write(`cleaned and re-scaffolded .orchestra/ at ${p.root}\n`);
+
     if (opts.scaffoldOnly) return;
     await runStart({
       cwd: root,
@@ -775,10 +886,22 @@ program
   });
 
 program
-  .command("compress-memory")
-  .description("Move oldest memory.md paragraphs to long_term.md if over the cap.")
+  .command("compact")
+  .description("Move the oldest memory.md paragraphs to long_term.md if memory.md is over its cap. Use this when memory.md has grown noisy and the agents are wasting tokens re-reading old context.")
   .option("-C, --cwd <dir>", "workspace root", process.cwd())
   .action(async (opts: { cwd: string }) => {
+    const r = await compressMemoryIfNeeded(resolve(opts.cwd));
+    process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+  });
+
+program
+  .command("compress-memory", { hidden: true })
+  .description("[DEPRECATED] Renamed to `orc compact`. Forwards there.")
+  .option("-C, --cwd <dir>", "workspace root", process.cwd())
+  .action(async (opts: { cwd: string }) => {
+    process.stderr.write(
+      "note: 'compress-memory' has been renamed to 'compact'. The old name still works but will be removed in a future version.\n",
+    );
     const r = await compressMemoryIfNeeded(resolve(opts.cwd));
     process.stdout.write(JSON.stringify(r, null, 2) + "\n");
   });
@@ -914,7 +1037,7 @@ program
       }
       process.stdout.write(
         allOk
-          ? "\nall agent CLIs updated. Restart agents with 'orc refresh <name>' or 'orc start'.\n"
+          ? "\nall agent CLIs updated. Restart agents with 'orc refresh <name>' or 'orc init'.\n"
           : "\nsome updates failed; see stderr above\n",
       );
       process.exit(allOk ? 0 : 1);
@@ -938,7 +1061,7 @@ program
       (await adapters.GEMINI.isAlive());
     if (!allAlive) {
       process.stderr.write(
-        "not all three agent sessions are alive; run 'orc start' or 'orc agent start <name>' first\n",
+        "not all three agent sessions are alive; run 'orc init' or 'orc agent start <name>' first\n",
       );
       process.exit(1);
     }

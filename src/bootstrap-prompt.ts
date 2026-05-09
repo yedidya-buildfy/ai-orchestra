@@ -4,7 +4,7 @@ import { paths } from "./workspace.js";
 
 /**
  * Build the "everything an agent needs to know" prompt — the single message
- * sent to a tmux session whenever it starts (initial `orc start`, named
+ * sent to a tmux session whenever it starts (initial `orc init`, named
  * `orc resume`, or refresh after a token-band crossing). Loads the live
  * `.orchestra/` files so the agent always wakes up to current state, never
  * a stale snapshot:

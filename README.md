@@ -29,12 +29,17 @@ Requirements: Node ≥ 20, tmux, and the `claude`, `codex`, and `gemini` CLIs
 on `PATH` (the agents themselves use your existing subscriptions; this tool
 does **not** call any API directly).
 
-> **Heads up — `1.0.0` is a breaking release.** The CLI binary was renamed
-> from `ai-orchestra` to `orc`, and `orc init` now scaffolds **and** brings
-> the agents up by default. Use `orc init --scaffold-only` for the old
-> behavior. Upgrading from `0.x`? Run
-> `npm uninstall -g @yedidya-dan/ai-orchestra && npm i -g @yedidya-dan/ai-orchestra`
-> to clean up the old `ai-orchestra` symlink.
+> **Heads up — major release notes.**
+> - **`1.0.0`** renamed the CLI binary from `ai-orchestra` to `orc`. If
+>   you're upgrading from `0.x`, run
+>   `npm uninstall -g @yedidya-dan/ai-orchestra && npm i -g @yedidya-dan/ai-orchestra`
+>   to clean up the old symlink.
+> - **`1.3.0`** removed `orc start` — `orc init` now does both jobs.
+>   On a fresh dir it scaffolds + spawns; on an existing workspace it
+>   leaves `.orchestra/` alone and just brings the agents back up to the
+>   current state. Pass `--scaffold-only` for files-only, `--force` to
+>   wipe and re-scaffold (destructive). `compress-memory` was renamed to
+>   `compact` — the old name still works but prints a deprecation note.
 
 ## Quickstart — one command
 
@@ -54,10 +59,11 @@ Detach with `Ctrl-B d` (the agents keep running). Re-attach later with `tmux att
 
 Useful flags:
 ```bash
-orc start --no-attach     # spawn everything but stay in your shell
-orc start --no-daemon     # no auto-dispatch loop
-orc start --no-codex      # leave Codex out of this run
-orc start --claude-cmd 'claude'  # don't pass the bypass flag
+orc init --no-attach     # spawn everything but stay in your shell
+orc init --no-daemon     # no auto-dispatch loop
+orc init --no-codex      # leave Codex out of this run
+orc init --claude-cmd 'claude'  # don't pass the bypass flag
+orc init --force         # destructive: wipe existing .orchestra/ and rescaffold
 ```
 
 ## Manual quickstart (if you want finer control)
@@ -155,12 +161,15 @@ Threshold bands (PRD §10):
 
 | | |
 |---|---|
-| `init` / `paths` / `show` | scaffolding + introspection |
+| `init` | open this dir as a workspace — scaffold if new, pick up where you left off if existing, then bring up the agents |
+| `clean --yes` | DESTRUCTIVE — kill the agents and reset `.orchestra/` to factory templates, then re-init |
+| `compact` | move oldest `memory.md` paragraphs to `long_term.md` when memory is over its cap |
+| `paths` / `show` | introspect resolved paths + parsed board state |
 | `rename <name>` / `resume <name>` / `list` / `forget <name>` | named sessions — capture per-CLI conversation IDs and replay them later |
 | `context [--runtime-* N] [--dry-run] [--json]` | measure + persist context health |
 | `agent start|stop|status|send` | tmux session lifecycle |
 | `tick` / `watch` / `daemon` / `daemon-stop` | orchestration loop |
-| `refresh <agent> [--reason …]` / `refresh-sweep` / `compress-memory` | survival mechanism |
+| `refresh <agent> [--reason …]` / `refresh-sweep` | survival mechanism |
 | `task start <id> "objective"` / `task verdict <approve\|reject\|needs_changes>` | execution-mode state machine |
 | `demo` | deterministic end-to-end walkthrough |
 | `doctor` / `status` / `logs <name>` / `recover` | observability + crash recovery |
