@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { join } from "node:path";
 import type { AgentName } from "./types.js";
 import { paths } from "./workspace.js";
 
@@ -162,4 +163,33 @@ export async function buildBootstrapPrompt(
     "user may now speak to you in plain language. If you are CODEX or",
     "GEMINI, wait for a dispatch.",
   ].join("\n");
+}
+
+/**
+ * Write the full bootstrap prompt to `.orchestra/sessions/<agent>-bootstrap.md`
+ * and return both the absolute path and a SHORT directive prompt that asks the
+ * agent to read the file. We send the short directive via `adapter.prompt()`
+ * instead of pasting the full text into the tmux pane: a multi-KB blob in
+ * Claude Code's TUI gets buffered as paste blocks that never auto-submit, and
+ * the same blob can overflow Codex's interactive input. A 1–2 line "read this
+ * file" instruction is small enough to clear both pitfalls and the agents,
+ * running in YOLO mode, can read the file freely.
+ */
+export async function prepareBootstrap(
+  agent: AgentName,
+  root: string,
+): Promise<{ file: string; relativePath: string; shortPrompt: string; fullText: string }> {
+  const fullText = await buildBootstrapPrompt(agent, root);
+  const p = paths(root);
+  await fs.mkdir(p.sessionsDir, { recursive: true });
+  const fname = `${agent.toLowerCase()}-bootstrap.md`;
+  const file = join(p.sessionsDir, fname);
+  await fs.writeFile(file, fullText + "\n", "utf8");
+  const relativePath = `.orchestra/sessions/${fname}`;
+  const shortPrompt =
+    `[orc] Read \`${relativePath}\` now — it contains your role, the AI Orchestra protocol, ` +
+    `and the current memory/board snapshot. After reading, follow its instructions. ` +
+    `If you're CLAUDE, the user will speak to you next in plain language. ` +
+    `If you're CODEX or GEMINI, simply acknowledge and wait quietly for a dispatch.`;
+  return { file, relativePath, shortPrompt, fullText };
 }

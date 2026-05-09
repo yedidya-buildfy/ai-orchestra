@@ -21,15 +21,25 @@ export interface AutoResponder {
 
 /** Patterns that apply to all three CLIs (trust prompts, generic continue). */
 const SHARED_RESPONDERS: AutoResponder[] = [
+  // Newer numbered-choice prompts (codex 0.128+, gemini 0.40+):
+  //   "Do you trust the contents of this directory?  1. Yes, continue ..."
+  //   "Do you trust the files in this folder?        1. Trust folder ..."
+  // Both default-highlight option 1 (the safe "trust just this folder" choice).
   {
-    pattern: /trust(ing)?\s+(this\s+)?(folder|directory|workspace|project)/i,
+    pattern: /do you trust the (contents of this directory|files in this folder)/i,
+    response: "1",
+    description: "trust folder (numbered choice → 1)",
+  },
+  // Legacy Y/N prompts on older CLI versions.
+  {
+    pattern: /trust(ing)?\s+(this\s+)?(folder|directory|workspace|project).{0,40}\([yY]\/[nN]\)/i,
     response: "y",
-    description: "trust folder",
+    description: "trust folder (Y/N)",
   },
   {
-    pattern: /do you (trust|want to trust)\s+(the\s+)?(files|authors|owners)/i,
+    pattern: /do you (trust|want to trust)\s+(the\s+)?(files|authors|owners).{0,40}\([yY]\/[nN]\)/i,
     response: "y",
-    description: "trust files",
+    description: "trust files (Y/N)",
   },
   {
     pattern: /press\s+(enter|return)\s+to\s+(continue|proceed|start)/i,

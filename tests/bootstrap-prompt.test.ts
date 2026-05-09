@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initWorkspace, paths } from "../src/workspace.js";
-import { buildBootstrapPrompt } from "../src/bootstrap-prompt.js";
+import { buildBootstrapPrompt, prepareBootstrap } from "../src/bootstrap-prompt.js";
 
 let root: string;
 
@@ -106,5 +106,42 @@ describe("buildBootstrapPrompt", () => {
     expect(await buildBootstrapPrompt("GEMINI", root)).toMatch(
       /^# AI Orchestra bootstrap — GEMINI/,
     );
+  });
+});
+
+describe("prepareBootstrap", () => {
+  it("writes the full prompt to .orchestra/sessions/<agent>-bootstrap.md and returns a short directive", async () => {
+    const r = await prepareBootstrap("CLAUDE", root);
+    // The file exists at the expected path:
+    expect(existsSync(r.file)).toBe(true);
+    expect(r.file.endsWith("/sessions/claude-bootstrap.md")).toBe(true);
+    expect(r.relativePath).toBe(".orchestra/sessions/claude-bootstrap.md");
+    // The on-disk content matches what buildBootstrapPrompt produced:
+    expect(readFileSync(r.file, "utf8")).toBe(r.fullText + "\n");
+    // The short prompt is small (kilobytes-not-tens-of) and references the file:
+    expect(r.shortPrompt.length).toBeLessThan(1000);
+    expect(r.shortPrompt).toMatch(/Read `\.orchestra\/sessions\/claude-bootstrap\.md`/);
+  });
+
+  it("writes a separate file per agent", async () => {
+    const claude = await prepareBootstrap("CLAUDE", root);
+    const codex = await prepareBootstrap("CODEX", root);
+    const gemini = await prepareBootstrap("GEMINI", root);
+    expect(claude.file).not.toBe(codex.file);
+    expect(codex.file).not.toBe(gemini.file);
+    // Each file's content names the right agent in its header:
+    expect(readFileSync(claude.file, "utf8")).toMatch(/AI Orchestra bootstrap — CLAUDE/);
+    expect(readFileSync(codex.file, "utf8")).toMatch(/AI Orchestra bootstrap — CODEX/);
+    expect(readFileSync(gemini.file, "utf8")).toMatch(/AI Orchestra bootstrap — GEMINI/);
+  });
+
+  it("overwrites the file on a second call (state refresh)", async () => {
+    const first = await prepareBootstrap("CODEX", root);
+    const lenFirst = first.fullText.length;
+    // Mutate memory.md so the bootstrap content changes:
+    writeFileSync(paths(root).memory, "# Active Memory\n\n- new fact since last bootstrap\n");
+    const second = await prepareBootstrap("CODEX", root);
+    expect(second.fullText.length).not.toBe(lenFirst);
+    expect(readFileSync(second.file, "utf8")).toMatch(/new fact since last bootstrap/);
   });
 });

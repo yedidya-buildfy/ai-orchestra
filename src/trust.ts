@@ -81,54 +81,84 @@ export async function trustClaude(absPath: string): Promise<TrustResult> {
   };
 }
 
-// ---------- Gemini CLI: ~/.gemini/settings.json ----------
+// ---------- Gemini CLI: ~/.gemini/trustedFolders.json (0.40+) ----------
 
 /**
- * Gemini CLI keeps a `trustedFolders` array (or object map) in
- * ~/.gemini/settings.json. We maintain it as an array of absolute paths.
- * If the file already uses an object map (newer schema), we set the path
- * key to `true` instead.
+ * Gemini CLI ≥ 0.40 keeps trusted folders in a SEPARATE file:
+ *   ~/.gemini/trustedFolders.json   (object map: { "/abs/path": "TRUST_FOLDER" })
+ * Older versions used a `trustedFolders` array/map inside ~/.gemini/settings.json.
+ * We write to BOTH locations so a CLI on either schema sees the trust.
  */
 export async function trustGemini(absPath: string): Promise<TrustResult> {
-  const cfgPath = join(homedir(), ".gemini", "settings.json");
-  let json: Record<string, unknown> = {};
-  if (existsSync(cfgPath)) {
+  const dir = join(homedir(), ".gemini");
+  await fs.mkdir(dir, { recursive: true });
+  const tfPath = join(dir, "trustedFolders.json");
+  const settingsPath = join(dir, "settings.json");
+  const notes: string[] = [];
+
+  // Primary: trustedFolders.json (Gemini 0.40+).
+  let tfMap: Record<string, unknown> = {};
+  let tfChanged = false;
+  if (existsSync(tfPath)) {
     try {
-      json = JSON.parse(await fs.readFile(cfgPath, "utf8"));
-    } catch (e) {
-      return {
-        agent: "GEMINI",
-        configPath: cfgPath,
-        changed: false,
-        detail: `parse error: ${(e as Error).message}`,
-      };
+      const parsed = JSON.parse(await fs.readFile(tfPath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        tfMap = parsed as Record<string, unknown>;
+      }
+    } catch {
+      tfMap = {};
     }
   }
+  if (tfMap[absPath] !== "TRUST_FOLDER") {
+    tfMap[absPath] = "TRUST_FOLDER";
+    tfChanged = true;
+  }
+  if (tfChanged) {
+    await atomicWrite(tfPath, JSON.stringify(tfMap, null, 2) + "\n", { bypassGuard: true });
+    notes.push(`wrote trustedFolders.json[${shortPath(absPath)}]=TRUST_FOLDER`);
+  }
 
-  const tf = json.trustedFolders;
+  // Legacy fallback: settings.json (older Geminis).
+  let settings: Record<string, unknown> = {};
+  if (existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
+  }
+  let settingsChanged = false;
+  const tf = settings.trustedFolders;
   if (tf && typeof tf === "object" && !Array.isArray(tf)) {
-    // Object-map schema: { "/path": true, ... }
-    const map = tf as Record<string, unknown>;
-    if (map[absPath] === true) {
-      return { agent: "GEMINI", configPath: cfgPath, changed: false, detail: "already trusted (map)" };
+    const m = tf as Record<string, unknown>;
+    if (m[absPath] !== true) {
+      m[absPath] = true;
+      settingsChanged = true;
     }
-    map[absPath] = true;
   } else if (Array.isArray(tf)) {
-    if (tf.includes(absPath)) {
-      return { agent: "GEMINI", configPath: cfgPath, changed: false, detail: "already trusted (array)" };
+    if (!tf.includes(absPath)) {
+      tf.push(absPath);
+      settingsChanged = true;
     }
-    tf.push(absPath);
   } else {
-    json.trustedFolders = [absPath];
+    settings.trustedFolders = [absPath];
+    settingsChanged = true;
+  }
+  if (settingsChanged) {
+    await atomicWrite(settingsPath, JSON.stringify(settings, null, 2) + "\n", {
+      bypassGuard: true,
+    });
+    notes.push("updated settings.json (legacy fallback)");
   }
 
-  await fs.mkdir(join(homedir(), ".gemini"), { recursive: true });
-  await atomicWrite(cfgPath, JSON.stringify(json, null, 2) + "\n", { bypassGuard: true });
+  const changed = tfChanged || settingsChanged;
   return {
     agent: "GEMINI",
-    configPath: cfgPath,
-    changed: true,
-    detail: `added ${shortPath(absPath)} to trustedFolders`,
+    configPath: tfPath,
+    changed,
+    detail: changed
+      ? notes.join("; ")
+      : `already trusted in both trustedFolders.json and settings.json`,
   };
 }
 

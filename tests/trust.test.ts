@@ -46,33 +46,59 @@ describe("trustClaude", () => {
 });
 
 describe("trustGemini", () => {
-  it("creates ~/.gemini/settings.json with trustedFolders array", async () => {
+  it("writes both ~/.gemini/trustedFolders.json (new) and settings.json (legacy)", async () => {
     const r = await trustGemini("/projects/myapp");
     expect(r.changed).toBe(true);
-    const json = JSON.parse(readFileSync(join(fakeHome, ".gemini", "settings.json"), "utf8"));
-    expect(json.trustedFolders).toEqual(["/projects/myapp"]);
+    // New schema (Gemini ≥ 0.40):
+    const newFile = JSON.parse(
+      readFileSync(join(fakeHome, ".gemini", "trustedFolders.json"), "utf8"),
+    );
+    expect(newFile["/projects/myapp"]).toBe("TRUST_FOLDER");
+    // Legacy fallback for older Geminis:
+    const legacy = JSON.parse(
+      readFileSync(join(fakeHome, ".gemini", "settings.json"), "utf8"),
+    );
+    expect(legacy.trustedFolders).toEqual(["/projects/myapp"]);
   });
 
-  it("appends to an existing trustedFolders array", async () => {
+  it("appends to an existing trustedFolders.json without clobbering other entries", async () => {
+    mkdirSync(join(fakeHome, ".gemini"), { recursive: true });
+    writeFileSync(
+      join(fakeHome, ".gemini", "trustedFolders.json"),
+      JSON.stringify({ "/already/here": "TRUST_FOLDER" }),
+    );
+    await trustGemini("/projects/myapp");
+    const json = JSON.parse(
+      readFileSync(join(fakeHome, ".gemini", "trustedFolders.json"), "utf8"),
+    );
+    expect(json["/already/here"]).toBe("TRUST_FOLDER");
+    expect(json["/projects/myapp"]).toBe("TRUST_FOLDER");
+  });
+
+  it("appends to an existing legacy trustedFolders array", async () => {
     mkdirSync(join(fakeHome, ".gemini"), { recursive: true });
     writeFileSync(
       join(fakeHome, ".gemini", "settings.json"),
       JSON.stringify({ trustedFolders: ["/already/here"], otherKey: "x" }),
     );
     await trustGemini("/projects/myapp");
-    const json = JSON.parse(readFileSync(join(fakeHome, ".gemini", "settings.json"), "utf8"));
+    const json = JSON.parse(
+      readFileSync(join(fakeHome, ".gemini", "settings.json"), "utf8"),
+    );
     expect(json.trustedFolders).toEqual(["/already/here", "/projects/myapp"]);
     expect(json.otherKey).toBe("x");
   });
 
-  it("supports the object-map schema for trustedFolders", async () => {
+  it("supports the legacy object-map schema for trustedFolders in settings.json", async () => {
     mkdirSync(join(fakeHome, ".gemini"), { recursive: true });
     writeFileSync(
       join(fakeHome, ".gemini", "settings.json"),
       JSON.stringify({ trustedFolders: { "/already/here": true } }),
     );
     await trustGemini("/projects/myapp");
-    const json = JSON.parse(readFileSync(join(fakeHome, ".gemini", "settings.json"), "utf8"));
+    const json = JSON.parse(
+      readFileSync(join(fakeHome, ".gemini", "settings.json"), "utf8"),
+    );
     expect(json.trustedFolders["/already/here"]).toBe(true);
     expect(json.trustedFolders["/projects/myapp"]).toBe(true);
   });

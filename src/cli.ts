@@ -12,7 +12,7 @@ import {
   YOLO_AGENT_CONFIG,
 } from "./agent-adapter.js";
 import { findAgentSessions, type AgentSessionIds } from "./conversation-finder.js";
-import { buildBootstrapPrompt } from "./bootstrap-prompt.js";
+import { prepareBootstrap } from "./bootstrap-prompt.js";
 import {
   getSession,
   listSessions,
@@ -212,19 +212,22 @@ async function runStart(opts: StartOpts): Promise<void> {
   }
 
   // Bootstrap prompt: tell each agent who it is, what its role is, and the
-  // current state of the .orchestra/ shared files. Without this, the three
-  // agents come up as fresh CLI sessions with no awareness of orchestra at
-  // all. Run all three in parallel with error tolerance — a slow inject
-  // shouldn't block boot.
+  // current state of the .orchestra/ shared files. We write the full bootstrap
+  // text to a per-agent file under .orchestra/sessions/ and send each agent a
+  // SHORT "please read this file" prompt — sending the full text via send-keys
+  // gets buffered as a paste block in Claude Code's TUI (never auto-submits)
+  // and can overflow Codex's input box. The short directive sidesteps both.
+  // Run all three in parallel with error tolerance — a slow inject shouldn't
+  // block boot.
   const bootstrapTargets = wanted.filter((a) => adapters[a].sessionName);
   if (bootstrapTargets.length > 0) {
-    process.stdout.write(`sending bootstrap prompt to each agent...\n`);
+    process.stdout.write(`sending bootstrap directive to each agent...\n`);
     await Promise.all(
       bootstrapTargets.map(async (a) => {
         try {
-          const prompt = await buildBootstrapPrompt(a, root);
-          await adapters[a].prompt(prompt);
-          process.stdout.write(`  ${a}: bootstrap sent (${prompt.length} chars)\n`);
+          const { relativePath, shortPrompt } = await prepareBootstrap(a, root);
+          await adapters[a].prompt(shortPrompt);
+          process.stdout.write(`  ${a}: bootstrap → ${relativePath}\n`);
         } catch (e) {
           process.stderr.write(
             `  ${a}: bootstrap failed: ${(e as Error).message}\n`,

@@ -9,7 +9,7 @@ import { appendToMemory, compressMemoryIfNeeded } from "./memory.js";
 import { detectRefreshRequests } from "./orchestrator.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { buildAdapters } from "./agent-adapter.js";
-import { buildBootstrapPrompt } from "./bootstrap-prompt.js";
+import { prepareBootstrap } from "./bootstrap-prompt.js";
 import type { AgentName, Board } from "./types.js";
 
 export type RefreshReason =
@@ -130,13 +130,16 @@ export async function refreshAgent(
   // Reset its self-request flag.
   await writeBoard(root, next);
 
-  // 5. Rehydrate via the canonical bootstrap prompt (same one that runs on
-  // initial spawn). This guarantees the refreshed agent re-reads its role
-  // file, the current memory.md, and the live board state — so anything
-  // that changed while it was killed is reflected in its working context.
-  const prompt = await buildBootstrapPrompt(agent, root);
-  await adapter.prompt(prompt);
-  notes.push("bootstrap prompt sent");
+  // 5. Rehydrate via the canonical bootstrap prompt (same path that runs on
+  // initial spawn): write the full bootstrap to .orchestra/sessions/<agent>-
+  // bootstrap.md and send a short "read that file" directive. This guarantees
+  // the refreshed agent re-reads its role file, the current memory.md, and
+  // the live board state — so anything that changed while it was killed is
+  // reflected in its working context — without overflowing the agent's input
+  // box.
+  const { shortPrompt } = await prepareBootstrap(agent, root);
+  await adapter.prompt(shortPrompt);
+  notes.push("bootstrap directive sent");
 
   // 6. Verify.
   const verified = await verifySession(adapter, opts.verifyTimeoutMs ?? 3000);
