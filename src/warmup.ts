@@ -220,3 +220,55 @@ async function safeBuffer(adapter: AgentAdapter): Promise<string> {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+export interface WaitForIdleOptions {
+  /** Hard cap on how long we'll wait (default 30s). */
+  timeoutMs?: number;
+  /** Buffer must be unchanged for this long to be considered idle (default 3s). */
+  quietMs?: number;
+  /** Polling interval for buffer growth checks (default 500ms). */
+  checkEveryMs?: number;
+}
+
+export interface WaitForIdleResult {
+  agent: AgentName;
+  settled: boolean;
+  durationMs: number;
+}
+
+/**
+ * Block until an agent's tmux pane buffer has stopped growing for `quietMs`
+ * (default 3 seconds) — i.e., the agent is no longer rendering output and is
+ * presumably waiting for input. The motivating case is Gemini: when its
+ * trust dialog is answered with "Trust parent folder", Gemini RESTARTS the
+ * CLI to apply the new trust, which prints a banner and re-renders the UI
+ * over several seconds. A naive "settle for N seconds" pause is either too
+ * short (bootstrap lands in the loading screen) or wastes time on the
+ * common no-restart case.
+ *
+ * Pair with `warmupAgent` first: warmup answers prompts, this waits for the
+ * resulting work to finish.
+ */
+export async function waitForIdle(
+  adapter: AgentAdapter,
+  opts: WaitForIdleOptions = {},
+): Promise<WaitForIdleResult> {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const quietMs = opts.quietMs ?? 3_000;
+  const interval = opts.checkEveryMs ?? 500;
+  const start = Date.now();
+  let lastBufLen = -1;
+  let lastChangeAt = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const buf = await safeBuffer(adapter);
+    if (buf.length !== lastBufLen) {
+      lastChangeAt = Date.now();
+      lastBufLen = buf.length;
+    }
+    if (Date.now() - lastChangeAt >= quietMs) {
+      return { agent: adapter.agent, settled: true, durationMs: Date.now() - start };
+    }
+    await sleep(interval);
+  }
+  return { agent: adapter.agent, settled: false, durationMs: Date.now() - start };
+}

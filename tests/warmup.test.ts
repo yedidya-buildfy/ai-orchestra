@@ -4,6 +4,7 @@ import {
   GEMINI_AUTO_RESPONDERS,
   CLAUDE_AUTO_RESPONDERS,
   warmupAgent,
+  waitForIdle,
 } from "../src/warmup.js";
 import type { AgentAdapter, RuntimeUsage } from "../src/agent-adapter.js";
 import type { AgentName } from "../src/types.js";
@@ -194,5 +195,33 @@ describe("warmupAgent", () => {
       maxTotalMs: 50,
     });
     expect(r.durationMs).toBeLessThan(500);
+  });
+});
+
+describe("waitForIdle", () => {
+  it("returns settled=true once the buffer stops growing for quietMs", async () => {
+    // Buffer grows for the first 3 reads, then stays the same.
+    const ad = new FakeAdapter("GEMINI", ["a", "ab", "abc", "abcd", "abcd", "abcd", "abcd"]);
+    const r = await waitForIdle(ad, { quietMs: 80, checkEveryMs: 20, timeoutMs: 5000 });
+    expect(r.settled).toBe(true);
+    expect(r.durationMs).toBeLessThan(1000);
+    expect(r.agent).toBe("GEMINI");
+  });
+
+  it("returns settled=false on timeout when the buffer keeps growing", async () => {
+    let n = 0;
+    const ad: AgentAdapter = {
+      agent: "CODEX",
+      sessionName: "codex",
+      tmux: { readPipeBuffer: async () => "x".repeat(++n) } as never,
+      spawn: async () => {},
+      kill: async () => {},
+      prompt: async () => {},
+      injectContext: async () => {},
+      readUsage: async () => null,
+      isAlive: async () => true,
+    };
+    const r = await waitForIdle(ad, { quietMs: 200, checkEveryMs: 10, timeoutMs: 100 });
+    expect(r.settled).toBe(false);
   });
 });

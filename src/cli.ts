@@ -40,7 +40,7 @@ import {
   viewExists,
   VIEW_SESSION,
 } from "./view.js";
-import { warmupAgent } from "./warmup.js";
+import { warmupAgent, waitForIdle } from "./warmup.js";
 import { DEFAULT_UPDATE_CMDS, updateAll } from "./updater.js";
 import { trustPath } from "./trust.js";
 import {
@@ -136,14 +136,20 @@ async function runStart(opts: StartOpts): Promise<void> {
   if (opts.gemini) wanted.push("GEMINI");
   if (opts.claude) wanted.push("CLAUDE");
 
+  // Distinguish agents that we just freshly spawned from agents that were
+  // already alive in tmux. Only the freshly-spawned ones need warmup +
+  // settle + bootstrap — the already-alive ones are mid-conversation and
+  // re-sending the bootstrap directive would be a noisy duplicate.
+  const freshlySpawned: AgentName[] = [];
   for (const a of wanted) {
     const ad = adapters[a];
     if (await ad.isAlive()) {
-      process.stdout.write(`agent ${a} already alive (session ${ad.sessionName})\n`);
+      process.stdout.write(`agent ${a} already alive (session ${ad.sessionName}) — leaving its conversation intact\n`);
       continue;
     }
     try {
       await ad.spawn();
+      freshlySpawned.push(a);
       process.stdout.write(
         `agent ${a} started (session ${ad.sessionName}): ${ad.tmux.command}\n`,
       );
@@ -182,13 +188,13 @@ async function runStart(opts: StartOpts): Promise<void> {
   }
 
   // Auto-warmup: dismiss "trust this folder?" / update prompts for any
-  // agent we just spawned. Run in parallel; ignore errors so a slow
-  // CLI never blocks the rest of the boot sequence.
-  const justSpawned = wanted.filter((a) => adapters[a].sessionName);
-  if (justSpawned.length > 0) {
-    process.stdout.write(`auto-answering setup prompts...\n`);
+  // agent we just freshly spawned. Already-alive agents are skipped — they
+  // are past these prompts and mid-conversation. Run in parallel; ignore
+  // errors so a slow CLI never blocks the rest of the boot sequence.
+  if (freshlySpawned.length > 0) {
+    process.stdout.write(`auto-answering setup prompts (fresh spawns only)...\n`);
     const results = await Promise.all(
-      justSpawned.map((a) =>
+      freshlySpawned.map((a) =>
         warmupAgent(adapters[a]).catch((e) => ({
           agent: a,
           responded: [],
@@ -211,27 +217,37 @@ async function runStart(opts: StartOpts): Promise<void> {
     }
   }
 
-  // Settle pause before bootstrap. Even after warmup answers a trust prompt,
-  // the dismiss → main-UI transition isn't instant — gemini in particular
-  // takes a beat. Without this pause, the bootstrap directive can land while
-  // the trust dialog is still on screen and get swallowed as input there.
-  if (wanted.length > 0) {
-    await new Promise((r) => setTimeout(r, 2000));
+  // Wait for each freshly-spawned agent to actually settle before sending
+  // the bootstrap. Already-alive agents skip this — they're past the loading
+  // phase. Naive "sleep N seconds" is wrong for two reasons: too short and
+  // Gemini's post-trust restart isn't done; too long and the common case
+  // wastes boot time. waitForIdle polls each pane and returns the moment
+  // its buffer stops growing for 3s — exits in seconds when the agent is
+  // quick, tolerates 30s for a full Gemini CLI restart.
+  if (freshlySpawned.length > 0) {
+    process.stdout.write(`waiting for agents to settle...\n`);
+    const results = await Promise.all(
+      freshlySpawned.map((a) => waitForIdle(adapters[a]).catch(() => null)),
+    );
+    for (const r of results) {
+      if (!r) continue;
+      const tag = r.settled ? "settled" : "timed out";
+      process.stdout.write(`  ${r.agent}: ${tag} (${(r.durationMs / 1000).toFixed(1)}s)\n`);
+    }
   }
 
-  // Bootstrap prompt: tell each agent who it is, what its role is, and the
-  // current state of the .orchestra/ shared files. We write the full bootstrap
-  // text to a per-agent file under .orchestra/sessions/ and send each agent a
-  // SHORT "please read this file" prompt — sending the full text via send-keys
-  // gets buffered as a paste block in Claude Code's TUI (never auto-submits)
-  // and can overflow Codex's input box. The short directive sidesteps both.
-  // Run all three in parallel with error tolerance — a slow inject shouldn't
-  // block boot.
-  const bootstrapTargets = wanted.filter((a) => adapters[a].sessionName);
-  if (bootstrapTargets.length > 0) {
-    process.stdout.write(`sending bootstrap directive to each agent...\n`);
+  // Bootstrap prompt: tell each freshly-spawned agent who it is, what its
+  // role is, and the current state of the .orchestra/ shared files. Skip
+  // already-alive agents — they're mid-conversation and re-sending the
+  // directive would just be noise in their pane. We write the full bootstrap
+  // text to a per-agent file under .orchestra/sessions/ and send each agent
+  // a SHORT "please read this file" prompt (sending the full text via send-
+  // keys gets buffered as paste blocks in Claude Code's TUI and can overflow
+  // Codex's input box). Run in parallel with error tolerance.
+  if (freshlySpawned.length > 0) {
+    process.stdout.write(`sending bootstrap directive to fresh spawns...\n`);
     await Promise.all(
-      bootstrapTargets.map(async (a) => {
+      freshlySpawned.map(async (a) => {
         try {
           const { relativePath, shortPrompt } = await prepareBootstrap(a, root);
           await adapters[a].prompt(shortPrompt);
@@ -243,6 +259,8 @@ async function runStart(opts: StartOpts): Promise<void> {
         }
       }),
     );
+  } else {
+    process.stdout.write(`no fresh spawns — leaving in-flight conversations alone\n`);
   }
 
   // Build the side-by-side view if all three are alive.
