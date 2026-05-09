@@ -1,7 +1,5 @@
-import { promises as fs } from "node:fs";
 import {
   appendChangelog,
-  paths,
   readBoard,
   writeBoard,
 } from "./workspace.js";
@@ -11,6 +9,7 @@ import { appendToMemory, compressMemoryIfNeeded } from "./memory.js";
 import { detectRefreshRequests } from "./orchestrator.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { buildAdapters } from "./agent-adapter.js";
+import { buildBootstrapPrompt } from "./bootstrap-prompt.js";
 import type { AgentName, Board } from "./types.js";
 
 export type RefreshReason =
@@ -131,17 +130,13 @@ export async function refreshAgent(
   // Reset its self-request flag.
   await writeBoard(root, next);
 
-  // 5. Rehydrate.
-  const protocol = await fs.readFile(paths(root).protocol, "utf8").catch(() => "");
-  const memory = await fs.readFile(paths(root).memory, "utf8").catch(() => "");
-  const boardText = await fs.readFile(paths(root).board, "utf8").catch(() => "");
-  await adapter.injectContext([
-    { label: "protocol.md", content: protocol },
-    { label: "memory.md", content: memory },
-    { label: "board.md", content: boardText },
-    { label: "objective", content: next.objective },
-  ]);
-  notes.push("rehydration prompt sent");
+  // 5. Rehydrate via the canonical bootstrap prompt (same one that runs on
+  // initial spawn). This guarantees the refreshed agent re-reads its role
+  // file, the current memory.md, and the live board state — so anything
+  // that changed while it was killed is reflected in its working context.
+  const prompt = await buildBootstrapPrompt(agent, root);
+  await adapter.prompt(prompt);
+  notes.push("bootstrap prompt sent");
 
   // 6. Verify.
   const verified = await verifySession(adapter, opts.verifyTimeoutMs ?? 3000);

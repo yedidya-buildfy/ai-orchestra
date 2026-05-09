@@ -73,6 +73,29 @@ orc daemon                # run the watcher in the background
 orc status                # board / context / agents at a glance
 ```
 
+## Talk to Claude, not to the files
+
+Starting in 1.2.0, every agent is bootstrapped on spawn (and on every refresh)
+with a prompt that includes its role file (`.orchestra/agents/<agent>.md`),
+the current `protocol.md` / `memory.md` / `board.md`, and an addendum that
+tells it whether it is the user's point of contact or a silent worker.
+
+In practice that means:
+
+- **Claude is your only interface.** When you tell Claude "fix the zip bug"
+  or "review the new dashboard layout", Claude itself updates `board.md`
+  (sets `NEXT_AGENT`, `STATUS=ACTIVE`, the objective) and the watcher daemon
+  forwards the dispatch to Codex or Gemini. You never edit those files.
+- **Codex and Gemini wait quietly.** They wake up on dispatch, do their
+  block, and go back to waiting. You don't type into their panes.
+- **Roles are configurable.** Edit `.orchestra/agents/claude.md` (or
+  `codex.md` / `gemini.md`) to redefine what each agent should focus on —
+  the change shows up in the next bootstrap or refresh, no restart needed.
+- **Refreshes preserve continuity.** When an agent crosses the token band
+  and gets refreshed, it comes back having re-read the live shared files,
+  so anything the team did while it was killed is reflected in its working
+  context.
+
 ## Named sessions — pick up where you left off
 
 Each agent's CLI keeps its own conversation history (Claude in `~/.claude/projects/…`,

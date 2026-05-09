@@ -12,6 +12,7 @@ import {
   YOLO_AGENT_CONFIG,
 } from "./agent-adapter.js";
 import { findAgentSessions, type AgentSessionIds } from "./conversation-finder.js";
+import { buildBootstrapPrompt } from "./bootstrap-prompt.js";
 import {
   getSession,
   listSessions,
@@ -208,6 +209,29 @@ async function runStart(opts: StartOpts): Promise<void> {
         process.stdout.write(`  ${r.agent}: no prompts detected\n`);
       }
     }
+  }
+
+  // Bootstrap prompt: tell each agent who it is, what its role is, and the
+  // current state of the .orchestra/ shared files. Without this, the three
+  // agents come up as fresh CLI sessions with no awareness of orchestra at
+  // all. Run all three in parallel with error tolerance — a slow inject
+  // shouldn't block boot.
+  const bootstrapTargets = wanted.filter((a) => adapters[a].sessionName);
+  if (bootstrapTargets.length > 0) {
+    process.stdout.write(`sending bootstrap prompt to each agent...\n`);
+    await Promise.all(
+      bootstrapTargets.map(async (a) => {
+        try {
+          const prompt = await buildBootstrapPrompt(a, root);
+          await adapters[a].prompt(prompt);
+          process.stdout.write(`  ${a}: bootstrap sent (${prompt.length} chars)\n`);
+        } catch (e) {
+          process.stderr.write(
+            `  ${a}: bootstrap failed: ${(e as Error).message}\n`,
+          );
+        }
+      }),
+    );
   }
 
   // Build the side-by-side view if all three are alive.

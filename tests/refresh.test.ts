@@ -124,9 +124,17 @@ describe("refreshAgent", () => {
     expect(r.verified).toBe(true);
     expect(ad.killed).toBe(1);
     expect(ad.spawned).toBe(1);
-    expect(ad.injected.length).toBe(1);
-    const labels = ad.injected[0]!.map((f) => f.label);
-    expect(labels).toEqual(["protocol.md", "memory.md", "board.md", "objective"]);
+    // Refresh now sends the canonical bootstrap prompt (single prompt() call)
+    // instead of injectContext blocks. The prompt must contain the agent's
+    // role + protocol + memory + board so the refreshed agent comes back
+    // fully oriented to current state.
+    expect(ad.prompts.length).toBe(1);
+    const sent = ad.prompts[0]!;
+    expect(sent).toMatch(/AI Orchestra bootstrap — CODEX/);
+    expect(sent).toMatch(/Codex/);
+    expect(sent).toMatch(/protocol\.md/);
+    expect(sent).toMatch(/memory\.md/);
+    expect(sent).toMatch(/board\.md/);
 
     // The snapshot must be persisted in memory.md.
     const mem = readFileSync(paths(root).memory, "utf8");
