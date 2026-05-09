@@ -58,7 +58,7 @@ export const DEFAULT_AGENT_CONFIG: AdapterFactoryConfig = {
 };
 
 /**
- * "Yolo" preset — what the `ai-orchestra start` one-shot command uses.
+ * "Yolo" preset — what the `orc start` one-shot command uses.
  * All three agents launch with their respective auto-approve / bypass flags
  * so the orchestrator can dispatch unattended without the agents stopping
  * on every action to ask for permission.

@@ -63,8 +63,211 @@ function readPackageVersion(): string {
   return "0.0.0";
 }
 
+type StartOpts = {
+  cwd: string;
+  claude: boolean;
+  codex: boolean;
+  gemini: boolean;
+  attach: boolean;
+  daemon: boolean;
+  trust: boolean;
+  autoUpdate?: boolean;
+  claudeCmd?: string;
+  codexCmd?: string;
+  geminiCmd?: string;
+};
+
+async function runStart(opts: StartOpts): Promise<void> {
+  const root = resolve(opts.cwd);
+
+  if (!(await TmuxSession.tmuxAvailable())) {
+    process.stderr.write("tmux is not installed or not on PATH\n");
+    process.exit(1);
+  }
+
+  // Init workspace if missing.
+  const p = paths(root);
+  if (!existsSync(p.root)) {
+    await initWorkspace(root);
+    process.stdout.write(`initialized .orchestra/ at ${p.root}\n`);
+  }
+
+  // Pre-trust the cwd in each CLI's config file. Idempotent; this
+  // suppresses the "trust this folder?" prompt on every future run.
+  if (opts.trust) {
+    const trustResults = await trustPath(root);
+    for (const t of trustResults) {
+      if (t.changed) {
+        process.stdout.write(`trust ${t.agent}: ${t.detail}\n`);
+      }
+    }
+  }
+
+  // Optional: pull latest CLI versions before spawning.
+  if (opts.autoUpdate) {
+    process.stdout.write(`updating agent CLIs first (--auto-update)...\n`);
+    const ur = await updateAll(["CLAUDE", "CODEX", "GEMINI"]);
+    for (const r of ur) {
+      const mark = r.ok ? "[ok]" : "[!!]";
+      process.stdout.write(`  ${mark} ${r.agent} (${r.durationMs}ms)\n`);
+    }
+  }
+
+  // Build adapters with YOLO defaults, allowing CLI overrides.
+  const cfg = {
+    CLAUDE: { command: opts.claudeCmd ?? YOLO_AGENT_CONFIG.CLAUDE.command },
+    CODEX: { command: opts.codexCmd ?? YOLO_AGENT_CONFIG.CODEX.command },
+    GEMINI: { command: opts.geminiCmd ?? YOLO_AGENT_CONFIG.GEMINI.command },
+  };
+  const adapters = buildAdapters(root, cfg);
+
+  const wanted: AgentName[] = [];
+  if (opts.codex) wanted.push("CODEX");
+  if (opts.gemini) wanted.push("GEMINI");
+  if (opts.claude) wanted.push("CLAUDE");
+
+  for (const a of wanted) {
+    const ad = adapters[a];
+    if (await ad.isAlive()) {
+      process.stdout.write(`agent ${a} already alive (session ${ad.sessionName})\n`);
+      continue;
+    }
+    try {
+      await ad.spawn();
+      process.stdout.write(
+        `agent ${a} started (session ${ad.sessionName}): ${ad.tmux.command}\n`,
+      );
+    } catch (e) {
+      process.stderr.write(`agent ${a} failed: ${(e as Error).message}\n`);
+    }
+  }
+
+  // Start the watcher daemon (unless --no-daemon).
+  if (opts.daemon) {
+    const pidFile = join(p.logsDir, "orchestrator.pid");
+    let alreadyRunning = false;
+    if (existsSync(pidFile)) {
+      const old = Number(readFileSync(pidFile, "utf8").trim());
+      if (Number.isFinite(old)) {
+        try {
+          process.kill(old, 0);
+          alreadyRunning = true;
+        } catch {
+          /* stale */
+        }
+      }
+    }
+    if (!alreadyRunning) {
+      const child = spawnProc(process.execPath, [process.argv[1]!, "watch", "-C", root], {
+        detached: true,
+        stdio: ["ignore", "ignore", "ignore"],
+        env: { ...process.env, ORCHESTRA_DAEMON: "1" },
+      });
+      child.unref();
+      writeFileSync(pidFile, String(child.pid) + "\n", "utf8");
+      process.stdout.write(`daemon started (pid ${child.pid})\n`);
+    } else {
+      process.stdout.write("daemon already running\n");
+    }
+  }
+
+  // Auto-warmup: dismiss "trust this folder?" / update prompts for any
+  // agent we just spawned. Run in parallel; ignore errors so a slow
+  // CLI never blocks the rest of the boot sequence.
+  const justSpawned = wanted.filter((a) => adapters[a].sessionName);
+  if (justSpawned.length > 0) {
+    process.stdout.write(`auto-answering setup prompts...\n`);
+    const results = await Promise.all(
+      justSpawned.map((a) =>
+        warmupAgent(adapters[a]).catch((e) => ({
+          agent: a,
+          responded: [],
+          rounds: 0,
+          durationMs: 0,
+          error: (e as Error).message,
+        })),
+      ),
+    );
+    for (const r of results) {
+      if (r.responded.length > 0) {
+        process.stdout.write(
+          `  ${r.agent}: ${r.responded
+            .map((x) => `${x.description}=${x.sent}`)
+            .join(", ")}\n`,
+        );
+      } else {
+        process.stdout.write(`  ${r.agent}: no prompts detected\n`);
+      }
+    }
+  }
+
+  // Build the side-by-side view if all three are alive.
+  const allAlive =
+    (await adapters.CLAUDE.isAlive()) &&
+    (await adapters.CODEX.isAlive()) &&
+    (await adapters.GEMINI.isAlive());
+
+  if (allAlive && opts.attach) {
+    try {
+      const r = await createView({
+        claudeSession: adapters.CLAUDE.sessionName,
+        codexSession: adapters.CODEX.sessionName,
+        geminiSession: adapters.GEMINI.sessionName,
+      });
+      for (const n of r.notes) process.stdout.write(`${n}\n`);
+    } catch (e) {
+      process.stderr.write(`view setup failed: ${(e as Error).message}\n`);
+      process.stderr.write(
+        `falling back to direct claude attach. agents are running.\n`,
+      );
+      const fallback = spawnProc(
+        "tmux",
+        ["attach", "-t", adapters.CLAUDE.sessionName],
+        { stdio: "inherit" },
+      );
+      fallback.on("exit", (code) => process.exit(code ?? 0));
+      return;
+    }
+    process.stdout.write(
+      [
+        "",
+        "attaching to side-by-side view.",
+        "  switch panes:    Ctrl-B then arrow keys, or click with mouse",
+        "  resize panes:    drag the divider with the mouse",
+        "  zoom one pane:   Ctrl-B then z   (toggle full-screen)",
+        "  detach:          Ctrl-B then d   (agents keep running)",
+        "  re-attach later: orc view",
+        "",
+      ].join("\n"),
+    );
+    const tmuxAttach = spawnProc("tmux", ["attach", "-t", VIEW_SESSION], {
+      stdio: "inherit",
+    });
+    tmuxAttach.on("exit", (code) => process.exit(code ?? 0));
+    return;
+  }
+
+  if (opts.attach && opts.claude) {
+    // Single-agent path: attach straight to claude.
+    process.stdout.write(
+      `\nattaching to Claude session (Ctrl-B then d to detach)\n\n`,
+    );
+    const tmuxAttach = spawnProc(
+      "tmux",
+      ["attach", "-t", adapters.CLAUDE.sessionName],
+      { stdio: "inherit" },
+    );
+    tmuxAttach.on("exit", (code) => process.exit(code ?? 0));
+    return;
+  }
+
+  process.stdout.write(
+    `\nall set. attach manually with:  orc view\n`,
+  );
+}
+
 program
-  .name("ai-orchestra")
+  .name("orc")
   .description("Self-refreshing multi-agent orchestration over Markdown.")
   .version(readPackageVersion(), "-v, --version", "print the installed version");
 
@@ -93,215 +296,17 @@ program
   )
   .option("--no-trust", "skip pre-trusting the cwd in each CLI's config")
   .option("--auto-update", "run 'update-clis' before spawning so agents start on the latest version")
-  .action(
-    async (opts: {
-      cwd: string;
-      claude: boolean;
-      codex: boolean;
-      gemini: boolean;
-      attach: boolean;
-      daemon: boolean;
-      trust: boolean;
-      autoUpdate?: boolean;
-      claudeCmd?: string;
-      codexCmd?: string;
-      geminiCmd?: string;
-    }) => {
-      const root = resolve(opts.cwd);
-
-      if (!(await TmuxSession.tmuxAvailable())) {
-        process.stderr.write("tmux is not installed or not on PATH\n");
-        process.exit(1);
-      }
-
-      // Init workspace if missing.
-      const p = paths(root);
-      if (!existsSync(p.root)) {
-        await initWorkspace(root);
-        process.stdout.write(`initialized .orchestra/ at ${p.root}\n`);
-      }
-
-      // Pre-trust the cwd in each CLI's config file. Idempotent; this
-      // suppresses the "trust this folder?" prompt on every future run.
-      if (opts.trust) {
-        const trustResults = await trustPath(root);
-        for (const t of trustResults) {
-          if (t.changed) {
-            process.stdout.write(`trust ${t.agent}: ${t.detail}\n`);
-          }
-        }
-      }
-
-      // Optional: pull latest CLI versions before spawning.
-      if (opts.autoUpdate) {
-        process.stdout.write(`updating agent CLIs first (--auto-update)...\n`);
-        const ur = await updateAll(["CLAUDE", "CODEX", "GEMINI"]);
-        for (const r of ur) {
-          const mark = r.ok ? "[ok]" : "[!!]";
-          process.stdout.write(`  ${mark} ${r.agent} (${r.durationMs}ms)\n`);
-        }
-      }
-
-      // Build adapters with YOLO defaults, allowing CLI overrides.
-      const cfg = {
-        CLAUDE: { command: opts.claudeCmd ?? YOLO_AGENT_CONFIG.CLAUDE.command },
-        CODEX: { command: opts.codexCmd ?? YOLO_AGENT_CONFIG.CODEX.command },
-        GEMINI: { command: opts.geminiCmd ?? YOLO_AGENT_CONFIG.GEMINI.command },
-      };
-      const adapters = buildAdapters(root, cfg);
-
-      const wanted: AgentName[] = [];
-      if (opts.codex) wanted.push("CODEX");
-      if (opts.gemini) wanted.push("GEMINI");
-      if (opts.claude) wanted.push("CLAUDE");
-
-      for (const a of wanted) {
-        const ad = adapters[a];
-        if (await ad.isAlive()) {
-          process.stdout.write(`agent ${a} already alive (session ${ad.sessionName})\n`);
-          continue;
-        }
-        try {
-          await ad.spawn();
-          process.stdout.write(
-            `agent ${a} started (session ${ad.sessionName}): ${ad.tmux.command}\n`,
-          );
-        } catch (e) {
-          process.stderr.write(`agent ${a} failed: ${(e as Error).message}\n`);
-        }
-      }
-
-      // Start the watcher daemon (unless --no-daemon).
-      if (opts.daemon) {
-        const pidFile = join(p.logsDir, "orchestrator.pid");
-        let alreadyRunning = false;
-        if (existsSync(pidFile)) {
-          const old = Number(readFileSync(pidFile, "utf8").trim());
-          if (Number.isFinite(old)) {
-            try {
-              process.kill(old, 0);
-              alreadyRunning = true;
-            } catch {
-              /* stale */
-            }
-          }
-        }
-        if (!alreadyRunning) {
-          const child = spawnProc(process.execPath, [process.argv[1]!, "watch", "-C", root], {
-            detached: true,
-            stdio: ["ignore", "ignore", "ignore"],
-            env: { ...process.env, ORCHESTRA_DAEMON: "1" },
-          });
-          child.unref();
-          writeFileSync(pidFile, String(child.pid) + "\n", "utf8");
-          process.stdout.write(`daemon started (pid ${child.pid})\n`);
-        } else {
-          process.stdout.write("daemon already running\n");
-        }
-      }
-
-      // Auto-warmup: dismiss "trust this folder?" / update prompts for any
-      // agent we just spawned. Run in parallel; ignore errors so a slow
-      // CLI never blocks the rest of the boot sequence.
-      const justSpawned = wanted.filter((a) => adapters[a].sessionName);
-      if (justSpawned.length > 0) {
-        process.stdout.write(`auto-answering setup prompts...\n`);
-        const results = await Promise.all(
-          justSpawned.map((a) =>
-            warmupAgent(adapters[a]).catch((e) => ({
-              agent: a,
-              responded: [],
-              rounds: 0,
-              durationMs: 0,
-              error: (e as Error).message,
-            })),
-          ),
-        );
-        for (const r of results) {
-          if (r.responded.length > 0) {
-            process.stdout.write(
-              `  ${r.agent}: ${r.responded
-                .map((x) => `${x.description}=${x.sent}`)
-                .join(", ")}\n`,
-            );
-          } else {
-            process.stdout.write(`  ${r.agent}: no prompts detected\n`);
-          }
-        }
-      }
-
-      // Build the side-by-side view if all three are alive.
-      const allAlive =
-        (await adapters.CLAUDE.isAlive()) &&
-        (await adapters.CODEX.isAlive()) &&
-        (await adapters.GEMINI.isAlive());
-
-      if (allAlive && opts.attach) {
-        try {
-          const r = await createView({
-            claudeSession: adapters.CLAUDE.sessionName,
-            codexSession: adapters.CODEX.sessionName,
-            geminiSession: adapters.GEMINI.sessionName,
-          });
-          for (const n of r.notes) process.stdout.write(`${n}\n`);
-        } catch (e) {
-          process.stderr.write(`view setup failed: ${(e as Error).message}\n`);
-          process.stderr.write(
-            `falling back to direct claude attach. agents are running.\n`,
-          );
-          const fallback = spawnProc(
-            "tmux",
-            ["attach", "-t", adapters.CLAUDE.sessionName],
-            { stdio: "inherit" },
-          );
-          fallback.on("exit", (code) => process.exit(code ?? 0));
-          return;
-        }
-        process.stdout.write(
-          [
-            "",
-            "attaching to side-by-side view.",
-            "  switch panes:    Ctrl-B then arrow keys, or click with mouse",
-            "  resize panes:    drag the divider with the mouse",
-            "  zoom one pane:   Ctrl-B then z   (toggle full-screen)",
-            "  detach:          Ctrl-B then d   (agents keep running)",
-            "  re-attach later: ai-orchestra view",
-            "",
-          ].join("\n"),
-        );
-        const tmuxAttach = spawnProc("tmux", ["attach", "-t", VIEW_SESSION], {
-          stdio: "inherit",
-        });
-        tmuxAttach.on("exit", (code) => process.exit(code ?? 0));
-        return;
-      }
-
-      if (opts.attach && opts.claude) {
-        // Single-agent path: attach straight to claude.
-        process.stdout.write(
-          `\nattaching to Claude session (Ctrl-B then d to detach)\n\n`,
-        );
-        const tmuxAttach = spawnProc(
-          "tmux",
-          ["attach", "-t", adapters.CLAUDE.sessionName],
-          { stdio: "inherit" },
-        );
-        tmuxAttach.on("exit", (code) => process.exit(code ?? 0));
-        return;
-      }
-
-      process.stdout.write(
-        `\nall set. attach manually with:  ai-orchestra view\n`,
-      );
-    },
-  );
+  .action(runStart);
 
 program
   .command("init")
-  .description("Scaffold .orchestra/ in the current directory.")
+  .description(
+    "Scaffold .orchestra/ in the current directory and immediately bring up the three agents (claude+codex+gemini) with the watcher daemon. Use --scaffold-only to skip spawning.",
+  )
   .option("-f, --force", "overwrite if .orchestra/ already exists", false)
   .option("-C, --cwd <dir>", "directory to initialize in", process.cwd())
-  .action(async (opts: { force: boolean; cwd: string }) => {
+  .option("--scaffold-only", "only create the .orchestra/ files; do not spawn agents", false)
+  .action(async (opts: { force: boolean; cwd: string; scaffoldOnly: boolean }) => {
     const root = resolve(opts.cwd);
     try {
       const p = await initWorkspace(root, { force: opts.force });
@@ -310,6 +315,16 @@ program
       process.stderr.write(`init failed: ${(e as Error).message}\n`);
       process.exit(1);
     }
+    if (opts.scaffoldOnly) return;
+    await runStart({
+      cwd: root,
+      claude: true,
+      codex: true,
+      gemini: true,
+      attach: true,
+      daemon: true,
+      trust: true,
+    });
   });
 
 program
@@ -749,7 +764,7 @@ program
       }
       process.stdout.write(
         allOk
-          ? "\nall agent CLIs updated. Restart agents with 'ai-orchestra refresh <name>' or 'ai-orchestra start'.\n"
+          ? "\nall agent CLIs updated. Restart agents with 'orc refresh <name>' or 'orc start'.\n"
           : "\nsome updates failed; see stderr above\n",
       );
       process.exit(allOk ? 0 : 1);
@@ -773,7 +788,7 @@ program
       (await adapters.GEMINI.isAlive());
     if (!allAlive) {
       process.stderr.write(
-        "not all three agent sessions are alive; run 'ai-orchestra start' or 'ai-orchestra agent start <name>' first\n",
+        "not all three agent sessions are alive; run 'orc start' or 'orc agent start <name>' first\n",
       );
       process.exit(1);
     }

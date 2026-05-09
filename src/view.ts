@@ -37,7 +37,7 @@ export interface CreateViewOptions {
   claudeSession: string;
   codexSession: string;
   geminiSession: string;
-  /** ms before auto-shrinking codex/gemini panes. 0 disables. */
+  /** ms before auto-shrinking codex/gemini panes. 0 (default) disables. */
   autoShrinkMs?: number;
   /** percentage width to give the claude pane after shrink (0-100). */
   claudeWidthPct?: number;
@@ -58,7 +58,7 @@ export interface CreateViewResult {
 export async function createView(opts: CreateViewOptions): Promise<CreateViewResult> {
   const notes: string[] = [];
   const { claudeSession, codexSession, geminiSession } = opts;
-  const autoShrinkMs = opts.autoShrinkMs ?? 10_000;
+  const autoShrinkMs = opts.autoShrinkMs ?? 0;
   const claudeWidth = Math.max(20, Math.min(95, opts.claudeWidthPct ?? 70));
 
   // Tear down any pre-existing view.

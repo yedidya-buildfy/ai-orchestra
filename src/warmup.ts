@@ -38,7 +38,7 @@ const SHARED_RESPONDERS: AutoResponder[] = [
   },
 ];
 
-/** Update prompts: skip in-CLI updates; we use `ai-orchestra update-clis`. */
+/** Update prompts: skip in-CLI updates; we use `orc update-clis`. */
 const SKIP_UPDATE_RESPONDERS: AutoResponder[] = [
   {
     pattern: /update\s+(now|available|recommended).{0,80}\([yY]\/[nN]\)/i,

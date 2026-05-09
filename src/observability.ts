@@ -37,7 +37,7 @@ export async function doctor(root: string): Promise<DoctorReport> {
   checks.push({
     name: ".orchestra/ exists",
     ok: wsOk,
-    detail: wsOk ? p.root : `missing — run 'ai-orchestra init' in ${root}`,
+    detail: wsOk ? p.root : `missing — run 'orc init' in ${root}`,
   });
 
   if (wsOk) {

@@ -21,19 +21,26 @@ lost; everything important is snapshotted to disk before a kill.
 ## Install
 
 ```bash
-npm i -g ai-orchestra
-ai-orchestra init
+npm i -g @yedidya-dan/ai-orchestra
+orc init
 ```
 
 Requirements: Node ≥ 20, tmux, and the `claude`, `codex`, and `gemini` CLIs
 on `PATH` (the agents themselves use your existing subscriptions; this tool
 does **not** call any API directly).
 
+> **Heads up — `1.0.0` is a breaking release.** The CLI binary was renamed
+> from `ai-orchestra` to `orc`, and `orc init` now scaffolds **and** brings
+> the agents up by default. Use `orc init --scaffold-only` for the old
+> behavior. Upgrading from `0.x`? Run
+> `npm uninstall -g @yedidya-dan/ai-orchestra && npm i -g @yedidya-dan/ai-orchestra`
+> to clean up the old `ai-orchestra` symlink.
+
 ## Quickstart — one command
 
 ```bash
 cd ~/projects/myapp
-ai-orchestra start
+orc init
 ```
 
 That single command:
@@ -47,23 +54,23 @@ Detach with `Ctrl-B d` (the agents keep running). Re-attach later with `tmux att
 
 Useful flags:
 ```bash
-ai-orchestra start --no-attach     # spawn everything but stay in your shell
-ai-orchestra start --no-daemon     # no auto-dispatch loop
-ai-orchestra start --no-codex      # leave Codex out of this run
-ai-orchestra start --claude-cmd 'claude'  # don't pass the bypass flag
+orc start --no-attach     # spawn everything but stay in your shell
+orc start --no-daemon     # no auto-dispatch loop
+orc start --no-codex      # leave Codex out of this run
+orc start --claude-cmd 'claude'  # don't pass the bypass flag
 ```
 
 ## Manual quickstart (if you want finer control)
 
 ```bash
-ai-orchestra init                  # scaffold .orchestra/
-ai-orchestra doctor                # sanity-check environment
-ai-orchestra demo                  # walk a deterministic complex-mode task
-ai-orchestra agent start claude    # spawn the Claude session in tmux
-ai-orchestra context               # measure + display per-agent usage
-ai-orchestra task start 001 "Fix ZIP validation bug"
-ai-orchestra daemon                # run the watcher in the background
-ai-orchestra status                # board / context / agents at a glance
+orc init --scaffold-only  # scaffold .orchestra/ without spawning agents
+orc doctor                # sanity-check environment
+orc demo                  # walk a deterministic complex-mode task
+orc agent start claude    # spawn the Claude session in tmux
+orc context               # measure + display per-agent usage
+orc task start 001 "Fix ZIP validation bug"
+orc daemon                # run the watcher in the background
+orc status                # board / context / agents at a glance
 ```
 
 ## Architecture
@@ -146,14 +153,14 @@ has WRITE everywhere.
 ### macOS — launchd
 
 ```xml
-<!-- ~/Library/LaunchAgents/com.user.ai-orchestra.plist -->
+<!-- ~/Library/LaunchAgents/com.user.orc.plist -->
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.user.ai-orchestra</string>
+  <key>Label</key><string>com.user.orc</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/ai-orchestra</string>
+    <string>/usr/local/bin/orc</string>
     <string>watch</string>
     <string>-C</string>
     <string>/path/to/your/project</string>
@@ -167,13 +174,13 @@ has WRITE everywhere.
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.user.ai-orchestra.plist
+launchctl load ~/Library/LaunchAgents/com.user.orc.plist
 ```
 
 ### Linux — systemd
 
 ```ini
-# /etc/systemd/system/ai-orchestra.service
+# /etc/systemd/system/orc.service
 [Unit]
 Description=AI Orchestra watcher
 After=network.target
@@ -181,7 +188,7 @@ After=network.target
 [Service]
 Type=simple
 User=youruser
-ExecStart=/usr/local/bin/ai-orchestra watch -C /path/to/your/project
+ExecStart=/usr/local/bin/orc watch -C /path/to/your/project
 Restart=on-failure
 RestartSec=2
 StandardOutput=append:/path/to/your/project/.orchestra/logs/systemd.out
@@ -192,7 +199,7 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl enable --now ai-orchestra
+sudo systemctl enable --now orc
 ```
 
 ### Log rotation
@@ -223,10 +230,10 @@ rotator. Example logrotate snippet:
 | Symptom | Fix |
 |---|---|
 | `tmux is not installed` | `brew install tmux` / `apt install tmux` |
-| `daemon already running (pid …)` | `ai-orchestra daemon-stop` (or remove stale `.orchestra/logs/orchestrator.pid` if process is gone) |
+| `daemon already running (pid …)` | `orc daemon-stop` (or remove stale `.orchestra/logs/orchestrator.pid` if process is gone) |
 | `Permission denied` on file write | check the agent's `Permissions.scope` glob in `board.md` |
 | Watcher loops on its own writes | hash-based dedup is built in; see `Orchestrator.lastSelfWriteHash` |
-| Agent stuck after refresh | `ai-orchestra recover` reconciles `board.md` against `changelog.md` |
+| Agent stuck after refresh | `orc recover` reconciles `board.md` against `changelog.md` |
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "@yedidya-dan/ai-orchestra",
-  "version": "0.5.1",
+  "version": "1.0.0",
   "description": "Self-refreshing, token-aware multi-agent orchestration over Markdown.",
   "repository": {
     "type": "git",
@@ -13,7 +13,7 @@
   "author": "yedidya-dan",
   "type": "module",
   "bin": {
-    "ai-orchestra": "dist/cli.js"
+    "orc": "dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
