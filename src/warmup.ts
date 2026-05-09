@@ -19,17 +19,13 @@ export interface AutoResponder {
   description: string;
 }
 
-/** Patterns that apply to all three CLIs (trust prompts, generic continue). */
+/**
+ * Patterns that apply to all three CLIs. The numbered-choice trust prompts
+ * (codex 0.128+ "Do you trust the contents of this directory?" and gemini
+ * 0.40+ "Do you trust the files in this folder?") behave differently and
+ * deserve different responses, so they live in the per-agent banks below.
+ */
 const SHARED_RESPONDERS: AutoResponder[] = [
-  // Newer numbered-choice prompts (codex 0.128+, gemini 0.40+):
-  //   "Do you trust the contents of this directory?  1. Yes, continue ..."
-  //   "Do you trust the files in this folder?        1. Trust folder ..."
-  // Both default-highlight option 1 (the safe "trust just this folder" choice).
-  {
-    pattern: /do you trust the (contents of this directory|files in this folder)/i,
-    response: "1",
-    description: "trust folder (numbered choice → 1)",
-  },
   // Legacy Y/N prompts on older CLI versions.
   {
     pattern: /trust(ing)?\s+(this\s+)?(folder|directory|workspace|project).{0,40}\([yY]\/[nN]\)/i,
@@ -47,6 +43,28 @@ const SHARED_RESPONDERS: AutoResponder[] = [
     description: "press enter",
   },
 ];
+
+/**
+ * Codex's trust prompt highlights option 1 by default ("1. Yes, continue").
+ * Sending "1" + Enter selects it — anything else risks "2. No, quit".
+ */
+const CODEX_TRUST_NUMBERED: AutoResponder = {
+  pattern: /do you trust the contents of this directory/i,
+  response: "1",
+  description: "trust folder (codex numbered → 1)",
+};
+
+/**
+ * Gemini's trust prompt offers three options: 1=this folder, 2=parent
+ * folder, 3=don't trust. We deliberately pick "2" (trust parent) so
+ * subdirectories of the workspace stop re-prompting. The user explicitly
+ * preferred this — broader trust over narrower-but-noisier.
+ */
+const GEMINI_TRUST_NUMBERED: AutoResponder = {
+  pattern: /do you trust the files in this folder/i,
+  response: "2",
+  description: "trust parent folder (gemini numbered → 2)",
+};
 
 /** Update prompts: skip in-CLI updates; we use `orc update-clis`. */
 const SKIP_UPDATE_RESPONDERS: AutoResponder[] = [
@@ -68,6 +86,7 @@ export const CLAUDE_AUTO_RESPONDERS: AutoResponder[] = [
 ];
 
 export const CODEX_AUTO_RESPONDERS: AutoResponder[] = [
+  CODEX_TRUST_NUMBERED,
   ...SHARED_RESPONDERS,
   ...SKIP_UPDATE_RESPONDERS,
   {
@@ -78,6 +97,7 @@ export const CODEX_AUTO_RESPONDERS: AutoResponder[] = [
 ];
 
 export const GEMINI_AUTO_RESPONDERS: AutoResponder[] = [
+  GEMINI_TRUST_NUMBERED,
   ...SHARED_RESPONDERS,
   ...SKIP_UPDATE_RESPONDERS,
   {
@@ -122,10 +142,13 @@ export async function warmupAgent(
   opts: WarmupOptions = {},
 ): Promise<WarmupResult> {
   const responders = opts.responders ?? RESPONDERS_BY_AGENT[adapter.agent];
-  const rounds = opts.rounds ?? 10;
+  const rounds = opts.rounds ?? 12;
   const delayMs = opts.delayMs ?? 1500;
   const maxTotalMs = opts.maxTotalMs ?? 30_000;
-  const initialDelayMs = opts.initialDelayMs ?? 1500;
+  // Increased default from 1500ms → 3000ms so slow CLIs (gemini after its
+  // self-update prints "Update successful! ...next run") have time to render
+  // their delayed trust prompt before warmup starts scanning the buffer.
+  const initialDelayMs = opts.initialDelayMs ?? 3000;
 
   const start = Date.now();
   const responded: WarmupResult["responded"] = [];
@@ -145,8 +168,11 @@ export async function warmupAgent(
 
     if (!fresh) {
       quietRounds++;
-      // If we've been quiet for 2 rounds AND haven't responded recently, exit early.
-      if (quietRounds >= 2 && lastResponseRound < r - 1) break;
+      // Exit early only after 4 consecutive quiet rounds (~6s). The shorter
+      // 2-round threshold caused premature exit when an agent's trust prompt
+      // hadn't rendered yet, leaving the bootstrap directive to land inside
+      // the still-active prompt input.
+      if (quietRounds >= 4 && lastResponseRound < r - 1) break;
       await sleep(delayMs);
       continue;
     }

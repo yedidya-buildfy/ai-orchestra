@@ -135,6 +135,12 @@ export class TmuxSession {
   /**
    * Send literal text to the pane, then press Enter.
    * Uses tmux send-keys with literal flag to avoid keyword interpretation.
+   *
+   * Sleeps briefly between the text and the Enter keystroke so the receiving
+   * TUI (most importantly Codex 0.128+, which can race on long input) has
+   * time to ingest the typed characters before the submit. Without this
+   * pause, the user would see the directive sitting in the input box and
+   * have to press Enter manually for it to go through.
    */
   async send(text: string): Promise<void> {
     if (!(await this.isAlive())) {
@@ -142,6 +148,7 @@ export class TmuxSession {
     }
     // tmux send-keys -l treats input literally (no key-name interpretation).
     await runTmux(["send-keys", "-t", this.name, "-l", text], { check: true });
+    await new Promise((r) => setTimeout(r, 200));
     await runTmux(["send-keys", "-t", this.name, "Enter"], { check: true });
   }
 

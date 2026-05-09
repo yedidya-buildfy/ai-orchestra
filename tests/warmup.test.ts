@@ -64,22 +64,47 @@ describe("auto-responder pattern bank", () => {
     }
   });
 
-  it("numbered-choice trust prompts (codex 0.128+, gemini 0.40+) get '1'", () => {
-    const banks = [CODEX_AUTO_RESPONDERS, GEMINI_AUTO_RESPONDERS, CLAUDE_AUTO_RESPONDERS];
-    const phrasings = [
-      // codex 0.128+
-      "Do you trust the contents of this directory? Working with untrusted contents...",
-      // gemini 0.40+
-      "Do you trust the files in this folder?\n\n1. Trust folder (orchestra-test)",
-    ];
-    for (const bank of banks) {
-      const rule = bank.find((r) =>
-        r.description.startsWith("trust folder (numbered"),
-      )!;
-      expect(rule).toBeDefined();
-      expect(rule.response).toBe("1");
-      for (const p of phrasings) expect(rule.pattern.test(p)).toBe(true);
-    }
+  it("codex's numbered trust prompt gets '1' (Yes, continue)", () => {
+    const codexTrust = CODEX_AUTO_RESPONDERS.find((r) =>
+      r.description.startsWith("trust folder (codex numbered"),
+    );
+    expect(codexTrust).toBeDefined();
+    expect(codexTrust!.response).toBe("1");
+    expect(
+      codexTrust!.pattern.test(
+        "> Do you trust the contents of this directory? Working with untrusted contents...",
+      ),
+    ).toBe(true);
+    // Must NOT match Gemini's prompt — that one wants a different answer.
+    expect(
+      codexTrust!.pattern.test(
+        "Do you trust the files in this folder?\n  1. Trust folder",
+      ),
+    ).toBe(false);
+  });
+
+  it("gemini's numbered trust prompt gets '2' (Trust parent folder)", () => {
+    const geminiTrust = GEMINI_AUTO_RESPONDERS.find((r) =>
+      r.description.startsWith("trust parent folder (gemini numbered"),
+    );
+    expect(geminiTrust).toBeDefined();
+    expect(geminiTrust!.response).toBe("2");
+    expect(
+      geminiTrust!.pattern.test(
+        "Do you trust the files in this folder?\n  1. Trust folder (orchestra-test)\n  2. Trust parent folder (yedidya)\n  3. Don't trust",
+      ),
+    ).toBe(true);
+    // Must NOT match codex's prompt.
+    expect(
+      geminiTrust!.pattern.test("Do you trust the contents of this directory?"),
+    ).toBe(false);
+  });
+
+  it("claude does NOT receive either numbered trust pattern (claude doesn't ask)", () => {
+    const claudeTrust = CLAUDE_AUTO_RESPONDERS.find((r) =>
+      r.description.includes("numbered"),
+    );
+    expect(claudeTrust).toBeUndefined();
   });
 
   it("update prompts get a 'no'", () => {
@@ -113,7 +138,7 @@ describe("warmupAgent", () => {
     expect(ad.prompts).toContain("y");
   });
 
-  it("answers a numbered-choice trust prompt with '1' (codex/gemini latest)", async () => {
+  it("answers codex's numbered trust prompt with '1'", async () => {
     const ad = new FakeAdapter("CODEX", [
       "",
       "> Do you trust the contents of this directory?\n  1. Yes, continue\n  2. No, quit\n",
@@ -121,8 +146,24 @@ describe("warmupAgent", () => {
       "Trusted. Ready.\n",
     ]);
     const r = await warmupAgent(ad, { initialDelayMs: 0, delayMs: 5, rounds: 6 });
-    expect(r.responded.some((x) => x.description.startsWith("trust folder (numbered"))).toBe(true);
+    expect(
+      r.responded.some((x) => x.description.startsWith("trust folder (codex numbered")),
+    ).toBe(true);
     expect(ad.prompts).toContain("1");
+  });
+
+  it("answers gemini's numbered trust prompt with '2' (parent folder)", async () => {
+    const ad = new FakeAdapter("GEMINI", [
+      "",
+      "Do you trust the files in this folder?\n  1. Trust folder (proj)\n  2. Trust parent folder (parent)\n  3. Don't trust\n",
+      "Trusted parent. Ready.\n",
+      "Trusted parent. Ready.\n",
+    ]);
+    const r = await warmupAgent(ad, { initialDelayMs: 0, delayMs: 5, rounds: 6 });
+    expect(
+      r.responded.some((x) => x.description.startsWith("trust parent folder (gemini numbered")),
+    ).toBe(true);
+    expect(ad.prompts).toContain("2");
   });
 
   it("declines an update prompt", async () => {

@@ -211,6 +211,14 @@ async function runStart(opts: StartOpts): Promise<void> {
     }
   }
 
+  // Settle pause before bootstrap. Even after warmup answers a trust prompt,
+  // the dismiss → main-UI transition isn't instant — gemini in particular
+  // takes a beat. Without this pause, the bootstrap directive can land while
+  // the trust dialog is still on screen and get swallowed as input there.
+  if (wanted.length > 0) {
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
   // Bootstrap prompt: tell each agent who it is, what its role is, and the
   // current state of the .orchestra/ shared files. We write the full bootstrap
   // text to a per-agent file under .orchestra/sessions/ and send each agent a
